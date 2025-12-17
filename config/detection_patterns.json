@@ -1,6 +1,7 @@
 {
   "available_patterns": [
     "no matching record",
+    "No matching record",
     "not found",
     "no data found", 
     "not exist",
@@ -10,20 +11,38 @@
     "状态: 未注册",
     "未注册",
     "not registered",
-    "no match"
+    "no match",
+    "no object found",
+    "domain not found",
+    "is available",
+    "does not exist",
+    "queried object does not exist",
+    "available for registration",
+    "domain status: available",
+    "nothing found",
+    "Domain Cannot Be Registered",
+    "No such domain",
+    "Object_Not_Found",
+    "not been registered",
+    "No data was found to match the request criteria"
   ],
   "redemption_patterns": [
     "redemption",
     "pending restore",
     "redemptionperiod", 
     "pending delete restorable",
-    "赎回期"
+    "赎回期",
+    "status: redemption",
+    "Not available for second level registration.",
+    "redemptionPeriod"
   ],
   "pending_delete_patterns": [
     "pending delete",
     "pendingdelete",
+    "pendingDelete",
     "to be released",
-    "待删除"
+    "待删除",
+    "status: pending delete"
   ],
   "expired_patterns": [
     "expired",
@@ -50,5 +69,14 @@
     "creation date:",
     "expiry date:",
     "name server"
+  ],
+  "grace_patterns": [
+    "renew grace",
+    "auto renew period",
+    "renewperiod",
+    "auto-renew grace",
+    "grace period",
+    "autorenewperiod",
+    "autoRenewPeriod"
   ]
 }

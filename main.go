@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,46 +11,52 @@ import (
 	"Puff/auth"
 	"Puff/config"
 	"Puff/core"
+	"Puff/logger"
 	"Puff/notification"
+	"Puff/storage"
 	"Puff/web"
 )
 
-const (
+// 导出版本号给其他包使用
+func GetAppVersion() string {
+	return AppVersion
+}
+
+var (
 	AppName    = "Puff"
-	AppVersion = "1.0.0"
+	AppVersion = "v0.9.1"
 )
 
 func main() {
-	fmt.Printf("%s v%s\n", AppName, AppVersion)
+	fmt.Printf("%s %s\n", AppName, AppVersion)
 	fmt.Println("正在启动...")
 
-	// 确保.env文件存在
-	if err := config.CreateDefaultEnvFile(); err != nil {
-		log.Printf("创建默认.env文件失败: %v", err)
-	}
-
-	// 加载.env文件
-	if err := config.LoadEnvFile(); err != nil {
-		log.Printf("加载.env文件失败: %v", err)
-	}
+	// 设置web包的版本号
+	web.SetAppVersion(AppVersion)
 
 	// 加载配置
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("加载配置失败: %v", err)
+		logger.Fatal("加载配置失败: %v", err)
+	}
+
+	// 初始化日志系统
+	if err := logger.Init(cfg.Log.Level, cfg.Log.File); err != nil {
+		logger.Warn("初始化日志文件失败: %v，将只输出到标准输出", err)
+	}
+	defer logger.Close()
+
+	logger.Info("日志系统已初始化，级别: %s", cfg.Log.Level)
+
+	// 清理孤立数据（启动时自动清理）
+	logger.Info("正在检查并清理孤立数据...")
+	if err := storage.CleanOrphanedData(); err != nil {
+		logger.Warn("清理孤立数据失败: %v", err)
 	}
 
 	// 验证配置
 	if err := cfg.Validate(); err != nil {
-		log.Fatalf("配置验证失败: %v", err)
-	}
-
-	// 创建域名监控器
-	monitor := core.NewMonitor(cfg)
-
-	// 加载域名列表
-	if err := monitor.LoadDomains(); err != nil {
-		log.Fatalf("加载域名列表失败: %v", err)
+		logger.Fatal("配置验证失败: %v", err)
 	}
 
 	// 创建认证器
@@ -60,22 +65,29 @@ func main() {
 	// 创建通知管理器
 	notificationMgr := notification.NewNotificationManager()
 
-	// 添加邮件通知器
+	// 始终创建邮件通知器（启用状态由配置控制）
+	emailNotifier := notification.NewEmailNotifier(cfg.SMTP)
+	notificationMgr.AddNotifier(emailNotifier)
 	if cfg.SMTP.Enabled {
-		emailNotifier := notification.NewEmailNotifier(cfg.SMTP)
-		notificationMgr.AddNotifier(emailNotifier)
-		log.Println("邮件通知器已启用")
+		logger.Info("邮件通知器已启用")
+	} else {
+		logger.Info("邮件通知器已创建但未启用")
 	}
 
-	// 添加Telegram通知器
+	// 始终创建Telegram通知器（启用状态由配置控制）
+	telegramNotifier := notification.NewTelegramNotifier(cfg.Telegram)
+	notificationMgr.AddNotifier(telegramNotifier)
 	if cfg.Telegram.Enabled {
-		telegramNotifier := notification.NewTelegramNotifier(cfg.Telegram)
-		notificationMgr.AddNotifier(telegramNotifier)
-		log.Println("Telegram通知器已启用")
+		logger.Info("Telegram通知器已启用")
+	} else {
+		logger.Info("Telegram通知器已创建但未启用")
 	}
 
 	// 启动通知管理器
 	notificationMgr.Start()
+
+	// 创建域名监控器（传入查询记录函数）
+	monitor := core.NewMonitor(cfg, notificationMgr.RecordDomainQuery)
 
 	// 启动通知处理协程
 	go handleNotifications(monitor, notificationMgr)
@@ -85,9 +97,9 @@ func main() {
 
 	// 启动监控器
 	if err := monitor.Start(); err != nil {
-		log.Printf("警告: 启动监控器失败: %v", err)
+		logger.Warn("启动监控器失败: %v", err)
 	} else {
-		log.Println("域名监控器已启动")
+		logger.Info("域名监控器已启动")
 	}
 
 	// 创建上下文用于优雅关闭
@@ -96,11 +108,11 @@ func main() {
 
 	// 启动Web服务器
 	go func() {
-		log.Printf("Web服务器启动在端口 %s", cfg.Server.Port)
-		log.Printf("访问地址: http://localhost:%s", cfg.Server.Port)
+		logger.Info("Web服务器启动在端口 %s", cfg.Server.Port)
+		logger.Info("访问地址: http://localhost:%s", cfg.Server.Port)
 
 		if err := webServer.Start(); err != nil {
-			log.Printf("Web服务器启动失败: %v", err)
+			logger.Error("Web服务器启动失败: %v", err)
 			cancel()
 		}
 	}()
@@ -111,13 +123,13 @@ func main() {
 
 	select {
 	case sig := <-sigChan:
-		log.Printf("收到信号: %v", sig)
+		logger.Info("收到信号: %v", sig)
 	case <-ctx.Done():
-		log.Println("应用程序上下文已取消")
+		logger.Info("应用程序上下文已取消")
 	}
 
 	// 优雅关闭
-	log.Println("正在关闭应用程序...")
+	logger.Info("正在关闭应用程序...")
 
 	// 创建关闭超时上下文
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -127,22 +139,22 @@ func main() {
 	go func() {
 		// 停止监控器
 		monitor.Stop()
-		log.Println("域名监控器已停止")
+		logger.Info("域名监控器已停止")
 
 		// 停止通知管理器
 		notificationMgr.Stop()
-		log.Println("通知管理器已停止")
+		logger.Info("通知管理器已停止")
 
 		// 停止Web服务器
 		if err := webServer.Stop(); err != nil {
-			log.Printf("警告: 停止Web服务器时出错: %v", err)
+			logger.Warn("停止Web服务器时出错: %v", err)
 		} else {
-			log.Println("Web服务器已停止")
+			logger.Info("Web服务器已停止")
 		}
 
 		// 清理认证器
 		authenticator.CleanupExpiredSessions()
-		log.Println("认证器已清理")
+		logger.Info("认证器已清理")
 
 		shutdownCancel()
 	}()
@@ -151,16 +163,16 @@ func main() {
 	<-shutdownCtx.Done()
 
 	if shutdownCtx.Err() == context.DeadlineExceeded {
-		log.Println("警告: 关闭超时，强制退出")
+		logger.Warn("关闭超时，强制退出")
 	} else {
-		log.Println("应用程序已优雅关闭")
+		logger.Info("应用程序已优雅关闭")
 	}
 }
 
 // handleNotifications 处理通知事件
 func handleNotifications(monitor *core.Monitor, notificationMgr *notification.NotificationManager) {
 	for event := range monitor.GetNotifications() {
-		log.Printf("📧 域名状态变化通知: %s %s -> %s",
+		logger.Info("域名状态变化通知: %s %s -> %s",
 			event.Domain, event.OldStatus, event.NewStatus)
 
 		// 构建通知事件
@@ -178,15 +190,6 @@ func handleNotifications(monitor *core.Monitor, notificationMgr *notification.No
 	}
 }
 
-// 初始化日志
-func init() {
-	// 设置日志格式
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-
-	// 可以在这里添加日志文件输出
-	// 例如：log.SetOutput(logFile)
-}
-
 // 显示帮助信息
 func showHelp() {
 	fmt.Printf(`%s v%s
@@ -198,12 +201,9 @@ func showHelp() {
   -h, --help     显示帮助信息
   -v, --version  显示版本信息
 
-环境变量:
-  请参考 .env.example 文件配置环境变量
-
-配置文件:
-  domains.yml    域名列表配置文件
-  .env          环境变量配置文件
+配置存储:
+  所有配置、域名列表、通知设置均存储在 SQLite 数据库中
+  数据文件：data/puff.db
 
 更多信息请查看 README.md 文件
 `, AppName, AppVersion, os.Args[0])

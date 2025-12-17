@@ -1,9 +1,15 @@
 package auth
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
 
 // Authenticator 认证器
@@ -13,6 +19,8 @@ type Authenticator struct {
 	sessionStore *SessionStore
 	mu           sync.RWMutex
 }
+
+const rememberCookieDuration = 30 * 24 * time.Hour
 
 // NewAuthenticator 创建认证器
 func NewAuthenticator(username, password string) *Authenticator {
@@ -53,7 +61,7 @@ func (a *Authenticator) ValidateSession(sessionID string) (*Session, error) {
 	}
 
 	// 更新最后访问时间
-	session.UpdateLastAccess()
+	session.UpdateLastAccess(a.sessionStore.GetMaxAge())
 	return session, nil
 }
 
@@ -177,4 +185,65 @@ func (a *Authenticator) UpdateUsername(newUsername string) error {
 
 	a.username = newUsername
 	return nil
+}
+
+// CreateSession 创建新的会话
+func (a *Authenticator) CreateSession() *Session {
+	return a.sessionStore.CreateSession()
+}
+
+// SessionMaxAge 返回会话最大有效期
+func (a *Authenticator) SessionMaxAge() time.Duration {
+	return a.sessionStore.GetMaxAge()
+}
+
+// RememberDuration 返回记住登录的有效期
+func (a *Authenticator) RememberDuration() time.Duration {
+	return rememberCookieDuration
+}
+
+// GenerateRememberToken 生成持久化登录令牌
+func (a *Authenticator) GenerateRememberToken() string {
+	if a.password == "" {
+		return ""
+	}
+	expiry := time.Now().Add(rememberCookieDuration).Unix()
+	payload := fmt.Sprintf("%s|%d", a.username, expiry)
+	signature := a.signRememberPayload(payload)
+	return fmt.Sprintf("%s|%s", payload, signature)
+}
+
+// ValidateRememberToken 校验持久化登录令牌
+func (a *Authenticator) ValidateRememberToken(token string) bool {
+	if a.password == "" {
+		return false
+	}
+	parts := strings.Split(token, "|")
+	if len(parts) != 3 {
+		return false
+	}
+
+	username := parts[0]
+	if subtle.ConstantTimeCompare([]byte(username), []byte(a.username)) != 1 {
+		return false
+	}
+
+	expiry, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return false
+	}
+	if time.Now().After(time.Unix(expiry, 0)) {
+		return false
+	}
+
+	payload := fmt.Sprintf("%s|%d", username, expiry)
+	expected := a.signRememberPayload(payload)
+
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(parts[2])) == 1
+}
+
+func (a *Authenticator) signRememberPayload(payload string) string {
+	mac := hmac.New(sha256.New, []byte(a.password))
+	mac.Write([]byte(payload))
+	return hex.EncodeToString(mac.Sum(nil))
 }

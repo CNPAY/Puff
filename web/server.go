@@ -12,24 +12,31 @@ import (
 	"Puff/config"
 	"Puff/core"
 	"Puff/notification"
+	"Puff/storage"
 )
 
 // Server Web服务器
 type Server struct {
-	config       *config.Config
-	monitor      *core.Monitor
-	auth         *auth.Authenticator
-	notification *notification.NotificationManager
-	httpServer   *http.Server
+	config         *config.Config
+	monitor        *core.Monitor
+	auth           *auth.Authenticator
+	notification   *notification.NotificationManager
+	httpServer     *http.Server
+	loginLimiter   *RateLimiter
+	batchLimiter   *RateLimiter
+	generalLimiter *RateLimiter
 }
 
 // NewServer 创建新的Web服务器
 func NewServer(cfg *config.Config, monitor *core.Monitor, authenticator *auth.Authenticator, notificationMgr *notification.NotificationManager) *Server {
 	return &Server{
-		config:       cfg,
-		monitor:      monitor,
-		auth:         authenticator,
-		notification: notificationMgr,
+		config:         cfg,
+		monitor:        monitor,
+		auth:           authenticator,
+		notification:   notificationMgr,
+		loginLimiter:   NewRateLimiter(5, 5*time.Minute),   // 5次/5分钟
+		batchLimiter:   NewRateLimiter(10, 1*time.Minute),  // 10次/分钟
+		generalLimiter: NewRateLimiter(100, 1*time.Minute), // 100次/分钟
 	}
 }
 
@@ -77,8 +84,8 @@ func (s *Server) Stop() error {
 
 // setupRoutes 设置路由
 func (s *Server) setupRoutes(mux *http.ServeMux) {
-	// 静态文件服务
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("web/static/"))))
+	// 静态文件服务（使用嵌入的文件）
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(GetStaticFS())))
 
 	// 主页面
 	mux.HandleFunc("/", s.handleIndex)
@@ -103,12 +110,22 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/update-username", s.withAuth(s.handleUpdateUsername))
 	mux.HandleFunc("/api/settings/smtp", s.withAuth(s.handleSmtpSettings))
 	mux.HandleFunc("/api/settings/telegram", s.withAuth(s.handleTelegramSettings))
+	mux.HandleFunc("/api/settings/monitor", s.withAuth(s.handleMonitorSettings))
 	mux.HandleFunc("/api/settings", s.withAuth(s.handleGetSettings))
 	mux.HandleFunc("/api/test/email", s.withAuth(s.handleTestEmail))
 	mux.HandleFunc("/api/test/telegram", s.withAuth(s.handleTestTelegram))
 
+	// 数据库维护
+	mux.HandleFunc("/api/database/clean-orphaned", s.withAuth(s.handleCleanOrphanedData))
+
 	// 健康检查
 	mux.HandleFunc("/health", s.handleHealth)
+
+	// WHOIS元数据API
+	mux.HandleFunc("/api/domain/whois-raw/", s.withAuth(s.handleDomainWhoisRaw))
+
+	// 版本检查API
+	mux.HandleFunc("/api/check-update", s.handleCheckUpdate)
 }
 
 // withAuth 认证中间件
@@ -121,19 +138,33 @@ func (s *Server) withAuth(handler http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// 从Cookie获取会话ID
-		cookie, err := r.Cookie("session_id")
-		if err != nil {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
+		if cookie, err := r.Cookie("session_id"); err == nil {
+			// 验证会话
+			if err := s.auth.AuthMiddleware(cookie.Value); err == nil {
+				handler(w, r)
+				return
+			}
 		}
 
-		// 验证会话
-		if err := s.auth.AuthMiddleware(cookie.Value); err != nil {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
+		// 尝试使用记住登录令牌恢复会话（重启后免登录）
+		if rememberCookie, err := r.Cookie("remember_token"); err == nil {
+			if s.auth.ValidateRememberToken(rememberCookie.Value) {
+				session := s.auth.CreateSession()
+				http.SetCookie(w, &http.Cookie{
+					Name:     "session_id",
+					Value:    session.ID,
+					Path:     "/",
+					HttpOnly: true,
+					Secure:   false,
+					SameSite: http.SameSiteLaxMode,
+					Expires:  session.ExpiresAt,
+				})
+				handler(w, r)
+				return
+			}
 		}
 
-		handler(w, r)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	}
 }
 
@@ -165,15 +196,35 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// 检查是否需要认证
 	if s.auth.RequireAuth() {
 		// 检查是否已登录
-		if cookie, err := r.Cookie("session_id"); err != nil || s.auth.AuthMiddleware(cookie.Value) != nil {
+		if cookie, err := r.Cookie("session_id"); err == nil && s.auth.AuthMiddleware(cookie.Value) == nil {
+			// 已有有效会话
+		} else if rememberCookie, err := r.Cookie("remember_token"); err == nil && s.auth.ValidateRememberToken(rememberCookie.Value) {
+			// 使用记住登录令牌恢复会话
+			session := s.auth.CreateSession()
+			http.SetCookie(w, &http.Cookie{
+				Name:     "session_id",
+				Value:    session.ID,
+				Path:     "/",
+				HttpOnly: true,
+				Secure:   false,
+				SameSite: http.SameSiteLaxMode,
+				Expires:  session.ExpiresAt,
+			})
+		} else {
 			// 未登录，重定向到登录页面
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
 	}
 
-	// 服务主页面
-	http.ServeFile(w, r, "web/static/index.html")
+	// 服务主页面（从嵌入的文件系统）
+	indexFile, err := staticFiles.ReadFile("static/index.html")
+	if err != nil {
+		http.Error(w, "Page not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(indexFile)
 }
 
 // handleHealth 健康检查处理器
@@ -183,6 +234,51 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"timestamp": time.Now(),
 		"monitor":   s.monitor.IsRunning(),
 		"domains":   len(s.monitor.GetDomains()),
+		"checks":    make(map[string]interface{}),
+	}
+
+	checks := health["checks"].(map[string]interface{})
+
+	// 检查数据库连接
+	dbStatus := "ok"
+	dbError := ""
+	if db, err := storage.GetDB(); err != nil {
+		dbStatus = "error"
+		dbError = err.Error()
+		health["status"] = "degraded"
+	} else if err := db.Ping(); err != nil {
+		dbStatus = "error"
+		dbError = err.Error()
+		health["status"] = "degraded"
+	}
+	checks["database"] = map[string]interface{}{
+		"status": dbStatus,
+		"error":  dbError,
+	}
+
+	// 检查配置文件加载
+	configStatus := "ok"
+	configError := ""
+	if err := config.LoadServerConfigs(); err != nil {
+		configStatus = "error"
+		configError = err.Error()
+		health["status"] = "degraded"
+	}
+	checks["config"] = map[string]interface{}{
+		"status": configStatus,
+		"error":  configError,
+	}
+
+	// 检查通知系统
+	notificationStatus := "ok"
+	notificationError := ""
+	if s.notification == nil {
+		notificationStatus = "error"
+		notificationError = "notification manager not initialized"
+	}
+	checks["notification"] = map[string]interface{}{
+		"status": notificationStatus,
+		"error":  notificationError,
 	}
 
 	s.writeJSON(w, health)

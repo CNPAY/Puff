@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"Puff/config"
+	"Puff/logger"
 )
 
 // DomainChecker 域名检查器
@@ -24,17 +25,24 @@ func NewDomainChecker(cfg *config.Config) *DomainChecker {
 	}
 }
 
+// UpdateConfig 更新配置（用于热重载）
+func (d *DomainChecker) UpdateConfig(cfg *config.Config) {
+	d.config = cfg
+	d.whoisClient.timeout = cfg.Monitor.Timeout
+	d.rdapClient.httpClient.Timeout = cfg.Monitor.Timeout
+}
+
 // CheckDomain 检查单个域名
 func (d *DomainChecker) CheckDomain(domain string) *DomainInfo {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 
-	// 获取TLD
-	tld := d.extractTLD(domain)
+	// 获取TLD（最长后缀匹配）
+	tld := config.FindBestTLD(domain)
 	if tld == "" {
 		return &DomainInfo{
 			Name:         domain,
 			Status:       StatusError,
-			ErrorMessage: "无法提取域名TLD",
+			ErrorMessage: "不支持的TLD",
 			LastChecked:  time.Now(),
 		}
 	}
@@ -56,55 +64,6 @@ func (d *DomainChecker) CheckDomain(domain string) *DomainInfo {
 		ErrorMessage: "WHOIS和RDAP查询都失败",
 		LastChecked:  time.Now(),
 	}
-}
-
-// CheckDomains 批量检查域名
-func (d *DomainChecker) CheckDomains(domains []string) []*DomainInfo {
-	results := make([]*DomainInfo, len(domains))
-
-	// 创建工作通道
-	type job struct {
-		index  int
-		domain string
-	}
-
-	jobs := make(chan job, len(domains))
-	results_chan := make(chan struct {
-		index int
-		info  *DomainInfo
-	}, len(domains))
-
-	// 启动工作协程
-	workerCount := d.config.Monitor.ConcurrentLimit
-	if workerCount > len(domains) {
-		workerCount = len(domains)
-	}
-
-	for i := 0; i < workerCount; i++ {
-		go func() {
-			for j := range jobs {
-				info := d.CheckDomain(j.domain)
-				results_chan <- struct {
-					index int
-					info  *DomainInfo
-				}{j.index, info}
-			}
-		}()
-	}
-
-	// 发送任务
-	for i, domain := range domains {
-		jobs <- job{i, domain}
-	}
-	close(jobs)
-
-	// 收集结果
-	for i := 0; i < len(domains); i++ {
-		result := <-results_chan
-		results[result.index] = result.info
-	}
-
-	return results
 }
 
 // ValidateDomain 验证域名格式
@@ -169,28 +128,20 @@ func (dc *DomainChecker) ValidateDomain(domain string) error {
 	return nil
 }
 
-// extractTLD 提取顶级域名
-func (d *DomainChecker) extractTLD(domain string) string {
-	parts := strings.Split(domain, ".")
-	if len(parts) < 2 {
-		return ""
-	}
-	return parts[len(parts)-1]
-}
-
 // tryRDAPQuery 尝试RDAP查询
 func (d *DomainChecker) tryRDAPQuery(domain, tld string) *DomainInfo {
-	server, exists := config.GetRDAPServerByTLD(tld)
+	server, exists := config.GetRDAPServerByTLD(domain)
 	if !exists {
 		return &DomainInfo{
 			Name:         domain,
 			Status:       StatusError,
-			ErrorMessage: fmt.Sprintf("不支持的TLD: %s (RDAP)", tld),
+			ErrorMessage: fmt.Sprintf("不支持的TLD或缺少RDAP服务器: %s", tld),
 			LastChecked:  time.Now(),
 		}
 	}
 
-	rdapResp, err := d.rdapClient.QueryRDAP(domain, server.Server)
+	// 使用新的QueryRDAPWithRaw方法同时获取解析后的数据和原始JSON
+	rdapResp, rawJSON, err := d.rdapClient.QueryRDAPWithRaw(domain, server.Server)
 	if err != nil {
 		return &DomainInfo{
 			Name:         domain,
@@ -200,13 +151,15 @@ func (d *DomainChecker) tryRDAPQuery(domain, tld string) *DomainInfo {
 		}
 	}
 
-	return d.rdapClient.ParseRDAPResponse(domain, rdapResp)
+	// 解析RDAP响应并传入原始JSON数据
+	return d.rdapClient.ParseRDAPResponse(domain, rdapResp, rawJSON)
 }
 
-// tryWhoisQuery 尝试WHOIS查询
+// tryWhoisQuery 尝试WHOIS查询（不带重试，重试由外层CheckDomainsWithCallback处理）
 func (d *DomainChecker) tryWhoisQuery(domain, tld string) *DomainInfo {
-	server, exists := config.GetWhoisServerByTLD(tld)
+	server, exists := config.GetWhoisServerByTLD(domain)
 	if !exists {
+		logger.Debug("Domain checker: no WHOIS server found for domain=%s tld=%s", domain, tld)
 		return &DomainInfo{
 			Name:         domain,
 			Status:       StatusError,
@@ -215,17 +168,36 @@ func (d *DomainChecker) tryWhoisQuery(domain, tld string) *DomainInfo {
 		}
 	}
 
+	// 单次WHOIS查询，不在此处重试
 	response, err := d.whoisClient.QueryWhois(domain, server.Server, server.Port)
 	if err != nil {
+		logger.Debug("Domain checker: WHOIS query failed for domain=%s err=%v", domain, err)
 		return &DomainInfo{
 			Name:         domain,
 			Status:       StatusError,
-			ErrorMessage: fmt.Sprintf("WHOIS查询失败: %v", err),
+			ErrorMessage: fmt.Sprintf("WHOIS连接失败: %v", err),
 			LastChecked:  time.Now(),
 		}
 	}
 
-	return d.whoisClient.ParseWhoisResponse(domain, response)
+	// WHOIS查询成功
+	result := d.whoisClient.ParseWhoisResponse(domain, response)
+	// 保存原始WHOIS数据
+	result.WhoisRaw = response
+	logger.Debug("Domain checker: WHOIS parsed result for domain=%s status=%s", domain, result.Status)
+
+	// 如果结果是unknown且响应很短，可能是网络问题
+	if result.Status == StatusUnknown && len(response) < 50 {
+		logger.Debug("Domain checker: WHOIS got unknown status with short response for domain=%s", domain)
+		return &DomainInfo{
+			Name:         domain,
+			Status:       StatusError,
+			ErrorMessage: "WHOIS响应过短，可能是网络问题",
+			LastChecked:  time.Now(),
+		}
+	}
+
+	return result
 }
 
 // GetSupportedTLDs 获取支持的TLD列表

@@ -24,6 +24,9 @@ const (
 	// StatusExpired 域名已过期
 	StatusExpired DomainStatus = "expired"
 
+	// StatusGrace 宽限期/续费宽限
+	StatusGrace DomainStatus = "grace"
+
 	// StatusTransferLocked 域名转移锁定
 	StatusTransferLocked DomainStatus = "transfer_locked"
 
@@ -42,13 +45,15 @@ type DomainInfo struct {
 	Name         string       `json:"name"`          // 域名名称
 	Status       DomainStatus `json:"status"`        // 域名状态
 	Registrar    string       `json:"registrar"`     // 注册商
-	CreatedDate  *time.Time   `json:"created_date"`  // 创建日期
+	CreatedDate  *time.Time   `json:"created_date"`  // 创建日期（注册时间）
 	ExpiryDate   *time.Time   `json:"expiry_date"`   // 过期日期
 	UpdatedDate  *time.Time   `json:"updated_date"`  // 更新日期
 	NameServers  []string     `json:"name_servers"`  // 名称服务器
 	LastChecked  time.Time    `json:"last_checked"`  // 最后检查时间
 	QueryMethod  string       `json:"query_method"`  // 查询方法 (whois/rdap)
 	ErrorMessage string       `json:"error_message"` // 错误信息
+	AddedAt      *time.Time   `json:"added_at"`      // 添加到系统的时间
+	WhoisRaw     string       `json:"whois_raw"`     // 原始WHOIS数据
 }
 
 // StatusInfo 状态信息定义
@@ -70,24 +75,24 @@ func GetAllStatusInfo() map[DomainStatus]StatusInfo {
 			Priority:     1,
 			ShouldNotify: true,
 		},
+		StatusGrace: {
+			Status:       StatusGrace,
+			Description:  "宽限期",
+			Color:        "#ffc107",
+			Priority:     2,
+			ShouldNotify: true,
+		},
 		StatusRedemption: {
 			Status:       StatusRedemption,
 			Description:  "域名在赎回期",
 			Color:        "#fd7e14", // 橙色
-			Priority:     2,
+			Priority:     3,
 			ShouldNotify: true,
 		},
 		StatusPendingDelete: {
 			Status:       StatusPendingDelete,
 			Description:  "域名待删除/抢注期",
 			Color:        "#dc3545", // 红色
-			Priority:     3,
-			ShouldNotify: true,
-		},
-		StatusExpired: {
-			Status:       StatusExpired,
-			Description:  "域名已过期",
-			Color:        "#ffc107", // 黄色
 			Priority:     4,
 			ShouldNotify: true,
 		},
@@ -96,20 +101,13 @@ func GetAllStatusInfo() map[DomainStatus]StatusInfo {
 			Description:  "域名已注册",
 			Color:        "#6c757d", // 灰色
 			Priority:     5,
-			ShouldNotify: false,
+			ShouldNotify: true, // 改为true，状态变化也需要通知
 		},
 		StatusTransferLocked: {
 			Status:       StatusTransferLocked,
 			Description:  "域名转移锁定",
 			Color:        "#17a2b8", // 青色
 			Priority:     6,
-			ShouldNotify: false,
-		},
-		StatusHold: {
-			Status:       StatusHold,
-			Description:  "域名被Hold",
-			Color:        "#6f42c1", // 紫色
-			Priority:     7,
 			ShouldNotify: false,
 		},
 		StatusUnknown: {
@@ -157,9 +155,10 @@ func (d *DomainInfo) GetStatusDescription() string {
 func (d *DomainInfo) IsImportant() bool {
 	importantStatuses := []DomainStatus{
 		StatusAvailable,
+		StatusGrace,
 		StatusRedemption,
 		StatusPendingDelete,
-		StatusExpired,
+		StatusRegistered,
 	}
 
 	for _, status := range importantStatuses {

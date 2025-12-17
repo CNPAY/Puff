@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"Puff/config"
 )
 
 // Notifier 通知器接口
@@ -40,45 +42,70 @@ type NotificationManager struct {
 	enabled     bool
 	sentHistory map[string]map[string]time.Time // domain -> status -> last_sent_time
 	mu          sync.RWMutex
+	aggregator  *NotificationAggregator // 通知聚合器
 }
 
 // NewNotificationManager 创建通知管理器
 func NewNotificationManager() *NotificationManager {
-	return &NotificationManager{
+	mgr := &NotificationManager{
 		notifiers:   make([]Notifier, 0),
 		queue:       make(chan NotificationEvent, 1000),
 		enabled:     true,
 		sentHistory: make(map[string]map[string]time.Time),
 	}
+
+	// 创建聚合器
+	mgr.aggregator = NewNotificationAggregator(mgr)
+
+	return mgr
 }
 
 // AddNotifier 添加通知器
 func (nm *NotificationManager) AddNotifier(notifier Notifier) {
-	if notifier.IsEnabled() {
-		nm.notifiers = append(nm.notifiers, notifier)
-	}
+	// 始终添加通知器，启用状态由配置控制
+	nm.notifiers = append(nm.notifiers, notifier)
 }
 
 // Start 启动通知管理器
 func (nm *NotificationManager) Start() {
 	go nm.processNotifications()
+	// 启动聚合器
+	if nm.aggregator != nil {
+		nm.aggregator.Start()
+	}
 }
 
 // Stop 停止通知管理器
 func (nm *NotificationManager) Stop() {
 	nm.enabled = false
+
+	// 停止聚合器
+	if nm.aggregator != nil {
+		nm.aggregator.Stop()
+	}
+
 	close(nm.queue)
 }
 
-// SendNotification 发送通知
+// SendNotification 发送通知（通过聚合器）
 func (nm *NotificationManager) SendNotification(event NotificationEvent) {
 	if !nm.enabled {
 		return
 	}
 
-	// 对于状态变更事件，检查是否需要去重
-	if event.Type == "status_change" && !nm.shouldSendNotification(event.Domain, event.Status) {
-		log.Printf("跳过重复状态变更通知: %s %s", event.Domain, event.Status)
+	// 状态变更事件通过聚合器处理
+	if event.Type == "status_change" && nm.aggregator != nil {
+		nm.aggregator.AddEvent(event)
+		return
+	}
+
+	// 其他类型的事件直接发送
+	nm.SendNotificationDirect(event)
+}
+
+// SendNotificationDirect 直接发送通知（绕过聚合器）
+func (nm *NotificationManager) SendNotificationDirect(event NotificationEvent) {
+	if !nm.enabled {
 		return
 	}
 
@@ -91,6 +118,46 @@ func (nm *NotificationManager) SendNotification(event NotificationEvent) {
 	default:
 		// 队列满了，丢弃消息
 		log.Printf("通知队列已满，丢弃通知: %s", event.Domain)
+	}
+}
+
+// SendNotificationDirectBatch 直接发送批量通知（绕过聚合器）
+func (nm *NotificationManager) SendNotificationDirectBatch(events []NotificationEvent) {
+	if !nm.enabled || len(events) == 0 {
+		return
+	}
+
+	// 构建批量通知的主题和消息
+	subject := nm.formatBatchSubject(events)
+	message := nm.formatBatchMessage(events)
+
+	// 发送给所有通知器
+	for _, notifier := range nm.notifiers {
+		if notifier.IsEnabled() {
+			go func(n Notifier) {
+				if err := n.SendMessage(subject, message); err != nil {
+					// 记录错误日志
+					if err != nil && strings.Contains(err.Error(), "short response") {
+					} else {
+						log.Printf("[错误] 发送 %s 批量通知失败: %v", n.GetType(), err)
+					}
+				} else {
+					log.Printf("[成功] %s 批量通知发送成功，包含 %d 个域名", n.GetType(), len(events))
+				}
+			}(notifier)
+		}
+	}
+
+	// 记录所有域名的通知历史
+	for _, event := range events {
+		nm.recordNotification(event.Domain, event.Status)
+	}
+}
+
+// RecordDomainQuery 记录域名开始查询
+func (nm *NotificationManager) RecordDomainQuery(domain string) {
+	if nm.aggregator != nil {
+		nm.aggregator.RecordDomainQuery(domain)
 	}
 }
 
@@ -163,7 +230,13 @@ func (nm *NotificationManager) sendToAllNotifiers(event NotificationEvent) {
 			go func(n Notifier) {
 				if err := n.SendMessage(subject, message); err != nil {
 					// 记录错误日志
-					// log.Printf("发送通知失败 [%s]: %v", n.GetType(), err)
+					if err != nil && strings.Contains(err.Error(), "short response") {
+					} else {
+						log.Printf("[错误] 发送 %s 通知失败: %v", n.GetType(), err)
+					}
+					log.Printf("[错误] 通知内容: 域名=%s, 事件类型=%s", event.Domain, event.Type)
+				} else {
+					log.Printf("[成功] %s 通知发送成功: 域名=%s", n.GetType(), event.Domain)
 				}
 			}(notifier)
 		}
@@ -174,17 +247,17 @@ func (nm *NotificationManager) sendToAllNotifiers(event NotificationEvent) {
 func (nm *NotificationManager) formatSubject(event NotificationEvent) string {
 	switch event.Type {
 	case "status_change":
-		return fmt.Sprintf("[域名监控] %s 状态变化", event.Domain)
+		return fmt.Sprintf("%s 状态变化", event.Domain)
 	case "available":
-		return fmt.Sprintf("[域名监控] %s 可注册！", event.Domain)
+		return fmt.Sprintf("%s 可注册！", event.Domain)
 	case "redemption":
-		return fmt.Sprintf("[域名监控] %s 进入赎回期", event.Domain)
+		return fmt.Sprintf("%s 进入赎回期", event.Domain)
 	case "pending_delete":
-		return fmt.Sprintf("[域名监控] %s 进入待删除期", event.Domain)
+		return fmt.Sprintf("%s 进入待删除期", event.Domain)
 	case "error":
-		return fmt.Sprintf("[域名监控] %s 查询失败", event.Domain)
+		return fmt.Sprintf("%s 查询失败", event.Domain)
 	default:
-		return fmt.Sprintf("[域名监控] %s 通知", event.Domain)
+		return fmt.Sprintf("%s 通知", event.Domain)
 	}
 }
 
@@ -217,7 +290,34 @@ func (nm *NotificationManager) formatMessage(event NotificationEvent) string {
 	}
 
 	message.WriteString("\n---\n")
-	message.WriteString("此消息由域名监控系统自动发送")
+	message.WriteString("此消息由 Puff 自动发送")
+
+	return message.String()
+}
+
+// formatBatchSubject 格式化批量通知主题
+func (nm *NotificationManager) formatBatchSubject(events []NotificationEvent) string {
+	return fmt.Sprintf("域名状态变化通知 (%d个域名)", len(events))
+}
+
+// formatBatchMessage 格式化批量通知消息
+func (nm *NotificationManager) formatBatchMessage(events []NotificationEvent) string {
+	var message strings.Builder
+
+	message.WriteString(fmt.Sprintf("检测到 %d 个域名状态发生变化\n", len(events)))
+	message.WriteString(fmt.Sprintf("时间: %s\n\n", time.Now().Format("2006-01-02 15:04:05")))
+
+	// 列出所有域名的状态变化
+	for i, event := range events {
+		message.WriteString(fmt.Sprintf("%d. %s\n", i+1, event.Domain))
+		message.WriteString(fmt.Sprintf("   状态变化: %s → %s\n", event.OldStatus, event.Status))
+		if i < len(events)-1 {
+			message.WriteString("\n")
+		}
+	}
+
+	message.WriteString("\n---\n")
+	message.WriteString("此消息由 Puff 自动发送")
 
 	return message.String()
 }
@@ -244,6 +344,37 @@ func (nm *NotificationManager) GetEnabledNotifiers() []string {
 	}
 
 	return enabled
+}
+
+// GetNotifiers 获取所有通知器
+func (nm *NotificationManager) GetNotifiers() []Notifier {
+	return nm.notifiers
+}
+
+// UpdateEmailConfig 更新邮件通知器配置
+func (nm *NotificationManager) UpdateEmailConfig(cfg config.SMTPConfig) error {
+	for _, notifier := range nm.notifiers {
+		if notifier.GetType() == "email" {
+			if emailNotifier, ok := notifier.(*EmailNotifier); ok {
+				emailNotifier.UpdateConfig(cfg)
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("未找到邮件通知器")
+}
+
+// UpdateTelegramConfig 更新Telegram通知器配置
+func (nm *NotificationManager) UpdateTelegramConfig(cfg config.TelegramConfig) error {
+	for _, notifier := range nm.notifiers {
+		if notifier.GetType() == "telegram" {
+			if telegramNotifier, ok := notifier.(*TelegramNotifier); ok {
+				telegramNotifier.UpdateConfig(cfg)
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("未找到Telegram通知器")
 }
 
 // GetStats 获取统计信息

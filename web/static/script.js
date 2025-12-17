@@ -8,7 +8,7 @@ let totalManageDomains = 0;
 // 分页相关变量
 let dashboardCurrentPage = 1;
 let manageCurrentPage = 1;
-const itemsPerPage = 10;
+let itemsPerPage = 20; // 默认每页20条
 
 let currentSort = { field: 'name', order: 'asc' };
 
@@ -27,6 +27,7 @@ const elements = {
     // 统计
     totalDomains: document.getElementById('totalDomains'),
     availableDomains: document.getElementById('availableDomains'),
+    graceDomains: document.getElementById('graceDomains'),
     pendingDeleteDomains: document.getElementById('pendingDeleteDomains'),
     redemptionDomains: document.getElementById('redemptionDomains'),
     
@@ -63,18 +64,28 @@ const elements = {
     notifications: document.getElementById('notifications')
 };
 
+const dateTimeOptions = {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+};
+
 // 初始化
 document.addEventListener('DOMContentLoaded', function() {
     initializeEventListeners();
     initializeNavigation();
     loadData();
+    checkForUpdates(); // 检查更新
     
-    // 定时刷新数据
     setInterval(() => {
-        if (currentPage === 'dashboard') {
-            loadData();
-        }
-    }, 60000); // 每分钟刷新一次
+         if (currentPage === 'dashboard') {
+             loadData();
+         }
+     }, 300000); // 每5分钟刷新一次
 });
 
 // 初始化事件监听器
@@ -83,6 +94,32 @@ function initializeEventListeners() {
     elements.navDashboard?.addEventListener('click', () => switchPage('dashboard'));
     elements.navDomains?.addEventListener('click', () => switchPage('domains'));
     elements.navSettings?.addEventListener('click', () => switchPage('settings'));
+    
+    // 移动端导航
+    document.getElementById('nav-dashboard-mobile')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchPage('dashboard');
+        closeMobileDropdown();
+    });
+    document.getElementById('nav-domains-mobile')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchPage('domains');
+        closeMobileDropdown();
+    });
+    document.getElementById('nav-settings-mobile')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchPage('settings');
+        closeMobileDropdown();
+    });
+    
+    // 点击页面其他地方关闭dropdown
+    document.addEventListener('click', (e) => {
+        const dropdown = document.getElementById('mobile-dropdown');
+        const menuBtn = document.getElementById('mobile-menu-btn');
+        if (dropdown && menuBtn && !dropdown.contains(e.target) && !menuBtn.contains(e.target)) {
+            closeMobileDropdown();
+        }
+    });
     
     // 监控控制
     elements.startMonitorBtn?.addEventListener('click', startMonitor);
@@ -109,7 +146,7 @@ function initializeEventListeners() {
     elements.addBatchDomainsBtn?.addEventListener('click', addBatchDomains);
     
     // 其他
-    elements.refreshBtn?.addEventListener('click', loadData);
+    elements.refreshBtn?.addEventListener('click', refreshFromDatabase);
     elements.logoutBtn?.addEventListener('click', logout);
     
     // 个人设置页面事件（现在在设置页面中）
@@ -117,6 +154,7 @@ function initializeEventListeners() {
     document.getElementById('update-username')?.addEventListener('click', handleUpdateUsername);
     
     // 设置页面事件
+    document.getElementById('saveSystemSettingsBtn')?.addEventListener('click', saveMonitorSettings);
     document.getElementById('saveSmtpBtn')?.addEventListener('click', saveSmtpSettings);
     document.getElementById('saveTelegramBtn')?.addEventListener('click', saveTelegramSettings);
     document.getElementById('testEmailBtn')?.addEventListener('click', testEmailSettings);
@@ -124,6 +162,9 @@ function initializeEventListeners() {
     
     // 分页事件
     bindPaginationEvents();
+    
+    // 初始化分页选择器
+    initializePaginationSelectors();
 }
 
 // 初始化导航
@@ -206,7 +247,15 @@ async function loadData() {
         const statsData = await statsResponse.json();
         
         domains = domainsData.domains || [];
-        totalDomains = domainsData.total || 0;
+        totalDomains = domainsData.total || 0; // 全量
+        const totalFiltered = domainsData.total_filtered !== undefined ? domainsData.total_filtered : domains.length;
+        window.__lastTotalFiltered = totalFiltered;
+        
+        console.log('[API响应] 当前页:', dashboardCurrentPage, '返回域名数:', domains.length, '总数:', totalDomains, '过滤后总数:', totalFiltered);
+        
+        // 同时更新全局变量，确保分页计算正确
+        filteredDomains = domains;
+        
         updateStatistics(statsData.monitor.status_counts);
         updateMonitorStatus(statsData.monitor.is_running);
         applyFilters();
@@ -224,6 +273,7 @@ function updateStatistics(statusCounts) {
     const stats = {
         total: totalDomains, // 使用总域名数，而不是当前页域名数
         available: 0,
+        grace: 0,
         pendingDelete: 0,
         redemption: 0
     };
@@ -231,6 +281,7 @@ function updateStatistics(statusCounts) {
     // 如果有状态统计数据，使用服务器端的完整统计
     if (statusCounts) {
         stats.available = statusCounts.available || 0;
+        stats.grace = statusCounts.grace || 0;
         stats.pendingDelete = statusCounts.pending_delete || 0;
         stats.redemption = statusCounts.redemption || 0;
     } else {
@@ -239,6 +290,9 @@ function updateStatistics(statusCounts) {
             switch (domain.status) {
                 case 'available':
                     stats.available++;
+                    break;
+                case 'grace':
+                    stats.grace++;
                     break;
                 case 'pending_delete':
                     stats.pendingDelete++;
@@ -251,8 +305,9 @@ function updateStatistics(statusCounts) {
     }
     
     // 动画更新数字
-    animateNumber(elements.totalDomains, stats.total);
+        animateNumber(elements.totalDomains, totalDomains);
     animateNumber(elements.availableDomains, stats.available);
+    animateNumber(elements.graceDomains, stats.grace);
     animateNumber(elements.pendingDeleteDomains, stats.pendingDelete);
     animateNumber(elements.redemptionDomains, stats.redemption);
 }
@@ -340,10 +395,11 @@ function createDomainRow(domain) {
     
     const statusClass = `status-${domain.status || 'unknown'}`;
     const statusText = getStatusText(domain.status);
-    const lastChecked = domain.last_checked ? 
-        new Date(domain.last_checked).toLocaleString('zh-CN') : '-';
-    const expiryDate = domain.expiry_date ? 
-        new Date(domain.expiry_date).toLocaleDateString('zh-CN') : '-';
+    const lastChecked = formatDateTime(domain.last_checked);
+    const expiryDate = domain.expiry_date ? formatDateTime(domain.expiry_date) : formatFieldValue('', 'expiry_date', domain);
+    
+    // 如果有错误信息，添加提示
+    const errorTooltip = domain.error_message ? `title="${domain.error_message}"` : '';
     
     row.innerHTML = `
         <td>
@@ -353,9 +409,10 @@ function createDomainRow(domain) {
             <a href="#" class="domain-link" data-domain="${domain.name}">${domain.name}</a>
         </td>
         <td>
-            <div class="badge ${statusClass}">${statusText}</div>
+            <div class="badge ${statusClass}" ${errorTooltip}>${statusText}</div>
+            ${domain.error_message ? '<span class="text-xs text-error ml-1" title="' + domain.error_message + '">!</span>' : ''}
         </td>
-        <td>${domain.registrar || '-'}</td>
+        <td>${formatFieldValue(domain.registrar, 'registrar', domain)}</td>
         <td>${expiryDate}</td>
         <td>
             <div class="text-sm">${lastChecked}</div>
@@ -387,14 +444,58 @@ function getStatusText(status) {
     const statusMap = {
         'available': '可注册',
         'registered': '已注册',
+        'grace': '宽限期',
         'redemption': '赎回期',
         'pending_delete': '待删除',
-        'expired': '已过期',
         'error': '查询错误',
-        'unknown': '未知'
+        'checking': '正在查询'
     };
     
-    return statusMap[status] || '未知';
+    return statusMap[status] || '已注册';
+}
+
+// 格式化字段值，处理不支持的字段
+function formatFieldValue(value, fieldType, domain) {
+    // 如果是查询错误状态，显示"查询错误"
+    if (domain && domain.status === 'error') {
+        if (fieldType === 'registrar' || fieldType === 'created_date' || 
+            fieldType === 'expiry_date' || fieldType === 'updated_date') {
+            return '<span class="text-error">查询错误</span>';
+        }
+    }
+    
+    // 如果是正在查询状态，显示"正在查询"
+    if (domain && domain.status === 'checking') {
+        if (fieldType === 'registrar' || fieldType === 'created_date' || 
+            fieldType === 'expiry_date' || fieldType === 'updated_date') {
+            return '<span class="text-info">正在查询...</span>';
+        }
+    }
+    
+    if (!value || value === '-') {
+        // 如果字段为空且域名状态不是available、error、checking，显示不支持提示
+        if (domain && domain.status !== 'available' && domain.status !== 'error' && domain.status !== 'checking') {
+            const tld = domain.name.split('.').pop();
+            switch (fieldType) {
+                case 'registrar':
+                    return `<span class="unsupported-field">${tld}后缀不支持注册商信息</span>`;
+                case 'created_date':
+                    return `<span class="unsupported-field">${tld}后缀不支持创建时间</span>`;
+                case 'expiry_date':
+                    return `<span class="unsupported-field">${tld}后缀不支持过期时间</span>`;
+                case 'updated_date':
+                    return `<span class="unsupported-field">${tld}后缀不支持更新时间</span>`;
+            }
+        }
+        return '-';
+    }
+    
+    // 检查是否为不支持的字段提示
+    if (typeof value === 'string' && value.includes('该后缀不支持')) {
+        return `<span class="unsupported-field">${value}</span>`;
+    }
+    
+    return value;
 }
 
 // 获取状态颜色类
@@ -402,13 +503,13 @@ function getStatusColor(status) {
     const colorMap = {
         'available': 'badge-success',
         'registered': 'badge-primary', 
+        'grace': 'badge-warning',
         'redemption': 'badge-warning',
         'pending_delete': 'badge-error',
-        'expired': 'badge-ghost',
         'error': 'badge-error',
-        'unknown': 'badge-neutral'
+        'unknown': 'badge-primary'
     };
-    return colorMap[status] || 'badge-neutral';
+    return colorMap[status] || 'badge-primary';
 }
 
 // 显示加载状态
@@ -424,16 +525,8 @@ function showNotification(message, type = 'info', duration = 5000) {
     const toast = document.createElement('div');
     toast.className = `alert alert-${type} shadow-lg`;
     
-    const icon = {
-        'success': '✓',
-        'error': '✗',
-        'warning': '⚠',
-        'info': 'ℹ'
-    }[type] || 'ℹ';
-    
     toast.innerHTML = `
         <div>
-            <span>${icon}</span>
             <span>${message}</span>
         </div>
     `;
@@ -486,9 +579,29 @@ async function reloadDomains() {
 async function testNotification() {
     try {
         const response = await fetch('/api/notification/test', { method: 'POST' });
-        if (!response.ok) throw new Error('测试通知失败');
+        const result = await response.json();
         
-        showNotification('通知测试已发送', 'success');
+        // 根据返回的状态显示不同的消息
+        if (result.status === 'warning') {
+            showNotification(result.message, 'warning');
+        } else if (result.status === 'error') {
+            showNotification(result.message, 'error');
+        } else {
+            // 构建详细的状态消息
+            let message = '';
+            if (result.email_status && result.telegram_status) {
+                message = `邮箱: ${result.email_status}, Telegram: ${result.telegram_status}`;
+            } else {
+                message = result.message;
+            }
+            
+            // 根据整体状态显示不同类型的通知
+            if (result.status === 'success') {
+                showNotification(message, 'success');
+            } else {
+                showNotification(message, 'warning');
+            }
+        }
     } catch (error) {
         showNotification('测试通知失败: ' + error.message, 'error');
     }
@@ -539,14 +652,10 @@ function showDomainModal(domain) {
     
     title.textContent = `${domain.name} - 域名详情`;
     
-    const lastChecked = domain.last_checked ? 
-        new Date(domain.last_checked).toLocaleString('zh-CN') : '-';
-    const createdDate = domain.created_date ? 
-        new Date(domain.created_date).toLocaleDateString('zh-CN') : '-';
-    const expiryDate = domain.expiry_date ? 
-        new Date(domain.expiry_date).toLocaleDateString('zh-CN') : '-';
-    const updatedDate = domain.updated_date ? 
-        new Date(domain.updated_date).toLocaleDateString('zh-CN') : '-';
+    const lastChecked = formatDateTime(domain.last_checked);
+    const createdDate = domain.created_date ? formatDateTime(domain.created_date) : formatFieldValue('', 'created_date', domain);
+    const expiryDate = domain.expiry_date ? formatDateTime(domain.expiry_date) : formatFieldValue('', 'expiry_date', domain);
+    const updatedDate = domain.updated_date ? formatDateTime(domain.updated_date) : formatFieldValue('', 'updated_date', domain);
     
     details.innerHTML = `
         <div class="domain-detail-grid">
@@ -562,7 +671,7 @@ function showDomainModal(domain) {
             </div>
             <div class="domain-detail-item">
                 <div class="domain-detail-label">注册商</div>
-                <div class="domain-detail-value">${domain.registrar || '-'}</div>
+                <div class="domain-detail-value">${formatFieldValue(domain.registrar, 'registrar', domain)}</div>
             </div>
             <div class="domain-detail-item">
                 <div class="domain-detail-label">创建时间</div>
@@ -596,14 +705,107 @@ function showDomainModal(domain) {
             ` : ''}
             ${domain.error_message ? `
             <div class="domain-detail-item col-span-full">
-                <div class="domain-detail-label">错误信息</div>
-                <div class="domain-detail-value text-error">${domain.error_message}</div>
+                <div class="domain-detail-label">查询错误信息</div>
+                <div class="domain-detail-value">
+                    <div class="alert alert-error">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <span class="text-sm">${domain.error_message}</span>
+                    </div>
+                </div>
+            </div>
+            ` : ''}
+            ${domain.status !== 'error' && domain.status !== 'unknown1' ? `
+            <div class="domain-detail-item col-span-full">
+                <div class="domain-detail-label">WHOIS元数据</div>
+                <div class="domain-detail-value">
+                    <button class="btn btn-sm btn-primary" onclick="viewWhoisRaw('${domain.name}', ${domain.whois_raw ? 'true' : 'false'})">
+                        ${domain.whois_raw ? '查看WHOIS原始数据' : '查询WHOIS原始数据'}
+                    </button>
+                </div>
             </div>
             ` : ''}
         </div>
     `;
     
     modal.showModal();
+}
+
+// 查看WHOIS原始数据（优先从数据库获取，没有才查询）
+async function viewWhoisRaw(domainName, hasData) {
+    try {
+        // 如果数据库中有数据，直接显示
+        if (hasData) {
+            const response = await fetch(`/api/domain/${domainName}`);
+            if (!response.ok) throw new Error('获取域名详情失败');
+            
+            const domain = await response.json();
+            if (domain.whois_raw) {
+                showWhoisRawData(domainName, domain.whois_raw);
+                return;
+            }
+        }
+        
+        // 数据库中没有数据，查询并保存
+        showNotification(`正在查询 ${domainName} 的WHOIS原始数据...`, 'info');
+        
+        const response = await fetch(`/api/domain/whois-raw/${domainName}`, { method: 'POST' });
+        if (!response.ok) {
+            const result = await response.json();
+            throw new Error(result.error || '查询WHOIS原始数据失败');
+        }
+        
+        const result = await response.json();
+        showNotification(`WHOIS原始数据查询成功`, 'success');
+        
+        // 显示WHOIS原始数据
+        showWhoisRawData(domainName, result.whois_raw);
+    } catch (error) {
+        showNotification(`查询WHOIS原始数据失败: ${error.message}`, 'error');
+    }
+}
+
+// 显示WHOIS原始数据模态框
+function showWhoisRawData(domainName, whoisRaw) {
+    const modal = document.getElementById('domainModal');
+    const title = document.getElementById('domainModalTitle');
+    const details = document.getElementById('domainDetails');
+    
+    if (!modal || !title || !details) return;
+    
+    title.textContent = `${domainName} - WHOIS原始数据`;
+    
+    details.innerHTML = `
+        <div class="w-full">
+            <div class="mb-4 flex justify-between items-center">
+                <span class="text-sm text-base-content/60">共 ${whoisRaw.length} 字符</span>
+                <button class="btn btn-sm btn-secondary" onclick="copyWhoisRaw()">
+                    复制到剪贴板
+                </button>
+            </div>
+            <textarea id="whoisRawContent" class="textarea textarea-bordered w-full h-96 font-mono text-xs" readonly>${whoisRaw}</textarea>
+        </div>
+    `;
+    
+    modal.showModal();
+}
+
+// 复制WHOIS原始数据到剪贴板
+function copyWhoisRaw() {
+    const textarea = document.getElementById('whoisRawContent');
+    if (textarea) {
+        textarea.select();
+        document.execCommand('copy');
+        showNotification('已复制到剪贴板', 'success');
+    }
+}
+
+function formatDateTime(value) {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (isNaN(date.getTime())) return '-';
+    return date.toLocaleString('zh-CN', dateTimeOptions);
 }
 
 // 批量操作
@@ -683,10 +885,13 @@ async function deleteSelectedDomains() {
         showNotification(`删除完成：成功 ${successCount} 个，失败 ${errorCount} 个`, 'warning');
     }
     
+    // 清空全选框
+    if (elements.selectAllCheckbox) elements.selectAllCheckbox.checked = false;
+    
     // 重新加载数据
-    loadData();
+    await loadData();
     if (currentPage === 'domains') {
-        loadDomainManagement();
+        await loadDomainManagement();
     }
 }
 
@@ -753,8 +958,19 @@ async function addSingleDomain() {
         
         const result = await response.json();
         
+        // 检查返回的status字段
+        if (result.status === 'error') {
+            // 如果是不支持的后缀，显示模态框
+            if (result.message && result.message.includes('不支持进行监控')) {
+                showUnsupportedDomainsModal([domain]);
+            } else {
+                showNotification(result.message || '添加域名失败', 'error');
+            }
+            return;
+        }
+        
         if (!response.ok) {
-            throw new Error(result.error || '添加域名失败');
+            throw new Error(result.error || result.message || '添加域名失败');
         }
         
         showNotification(`域名 ${domain} 添加成功`, 'success');
@@ -806,8 +1022,17 @@ async function addBatchDomains() {
         if (result.invalid_count > 0) {
             message += `，${result.invalid_count} 个域名无效`;
         }
+        if (result.unsupported_count > 0) {
+            message += `，${result.unsupported_count} 个域名后缀不支持`;
+        }
         
-        showNotification(message, result.invalid_count > 0 ? 'warning' : 'success');
+        showNotification(message, (result.invalid_count > 0 || result.unsupported_count > 0) ? 'warning' : 'success');
+        
+        // 如果有不支持的域名，显示模态框
+        if (result.unsupported_count > 0 && result.unsupported_domains) {
+            showUnsupportedDomainsModal(result.unsupported_domains);
+        }
+        
         textarea.value = '';
         loadData();
         if (currentPage === 'domains') {
@@ -816,6 +1041,26 @@ async function addBatchDomains() {
     } catch (error) {
         showNotification('批量添加失败: ' + error.message, 'error');
     }
+}
+
+// 显示不支持的域名模态框
+function showUnsupportedDomainsModal(domains) {
+    const modal = document.createElement('div');
+    modal.className = 'modal modal-open';
+    modal.innerHTML = `
+        <div class="modal-box">
+            <h3 class="font-bold text-lg mb-4">以下域名后缀不支持监控</h3>
+            <div class="max-h-96 overflow-y-auto">
+                <ul class="list-disc list-inside space-y-1">
+                    ${domains.map(d => `<li class="text-error">${d}</li>`).join('')}
+                </ul>
+            </div>
+            <div class="modal-action">
+                <button class="btn btn-primary" onclick="this.closest('.modal').remove()">确定</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
 }
 
 // 设置页面
@@ -898,6 +1143,7 @@ async function loadConfigSettings() {
             document.getElementById('smtpHost').value = settings.smtp.host || '';
             document.getElementById('smtpPort').value = settings.smtp.port || 587;
             document.getElementById('smtpUser').value = settings.smtp.user || '';
+            document.getElementById('smtpPass').value = settings.smtp.password || ''; // 填充密码
             document.getElementById('smtpFrom').value = settings.smtp.from || '';
             document.getElementById('smtpTo').value = settings.smtp.to || '';
             document.getElementById('emailNotificationToggle').checked = settings.smtp.enabled || false;
@@ -905,6 +1151,7 @@ async function loadConfigSettings() {
         
         // 填充Telegram设置
         if (settings.telegram) {
+            document.getElementById('telegramBotToken').value = settings.telegram.bot_token || ''; // 填充bot token
             document.getElementById('telegramChatId').value = settings.telegram.chat_id || '';
             document.getElementById('telegramNotificationToggle').checked = settings.telegram.enabled || false;
         }
@@ -936,14 +1183,64 @@ async function removeDomain(domainName) {
         if (!response.ok) {
             throw new Error(result.error || '删除域名失败');
         }
-        
-        showNotification(`域名 ${domainName} 删除成功`, 'success');
-        loadData();
-        if (currentPage === 'domains') {
-            loadDomainManagement();
-        }
+    
+    showNotification(`域名 ${domainName} 删除成功`, 'success');
+    
+    // 立即重新加载数据
+    await loadData();
+    if (currentPage === 'domains') {
+        await loadDomainManagement();
+    }
     } catch (error) {
         showNotification('删除域名失败: ' + error.message, 'error');
+    }
+}
+
+// 刷新数据（从数据库获取，不重新查询）
+async function refreshFromDatabase() {
+    showLoading(true);
+    
+    try {
+        const searchTerm = elements.searchInput?.value.trim() || '';
+        const statusFilter = elements.statusFilter?.value || '';
+        
+        let apiUrl = `/api/domains?page=${dashboardCurrentPage}&limit=${itemsPerPage}`;
+        if (searchTerm) {
+            apiUrl += `&search=${encodeURIComponent(searchTerm)}`;
+        }
+        if (statusFilter) {
+            apiUrl += `&status=${encodeURIComponent(statusFilter)}`;
+        }
+        
+        const [domainsResponse, statsResponse] = await Promise.all([
+            fetch(apiUrl),
+            fetch('/api/stats')
+        ]);
+        
+        if (!domainsResponse.ok || !statsResponse.ok) {
+            throw new Error('加载数据失败');
+        }
+        
+        const domainsData = await domainsResponse.json();
+        const statsData = await statsResponse.json();
+        
+        domains = domainsData.domains || [];
+        totalDomains = domainsData.total || 0;
+        const totalFiltered = domainsData.total_filtered !== undefined ? domainsData.total_filtered : domains.length;
+        window.__lastTotalFiltered = totalFiltered;
+        
+        filteredDomains = domains;
+        
+        updateStatistics(statsData.monitor.status_counts);
+        updateMonitorStatus(statsData.monitor.is_running);
+        applyFilters();
+        
+        showNotification('数据已从数据库刷新', 'success');
+    } catch (error) {
+        console.error('刷新数据失败:', error);
+        showNotification('刷新数据失败: ' + error.message, 'error');
+    } finally {
+        showLoading(false);
     }
 }
 
@@ -972,6 +1269,22 @@ function bindPaginationEvents() {
         }
     });
     
+    // 仪表板分页大小选择
+    document.getElementById('pageSizeSelect')?.addEventListener('change', (e) => {
+        const newSize = parseInt(e.target.value);
+        if (newSize >= 20 && newSize <= 100) {
+            itemsPerPage = newSize;
+            dashboardCurrentPage = 1; // 重置到第一页
+            loadData();
+            
+            // 同步域名管理的分页大小选择器
+            const manageSelect = document.getElementById('managePageSizeSelect');
+            if (manageSelect) {
+                manageSelect.value = newSize.toString();
+            }
+        }
+    });
+    
     // 域名管理分页
     document.getElementById('managePrevPageBtn')?.addEventListener('click', () => {
         if (manageCurrentPage > 1) {
@@ -987,6 +1300,37 @@ function bindPaginationEvents() {
             loadDomainManagement();
         }
     });
+    
+    // 域名管理分页大小选择
+    document.getElementById('managePageSizeSelect')?.addEventListener('change', (e) => {
+        const newSize = parseInt(e.target.value);
+        if (newSize >= 20 && newSize <= 100) {
+            itemsPerPage = newSize;
+            manageCurrentPage = 1; // 重置到第一页
+            loadDomainManagement();
+            
+            // 同步仪表板的分页大小选择器
+            const dashboardSelect = document.getElementById('pageSizeSelect');
+            if (dashboardSelect) {
+                dashboardSelect.value = newSize.toString();
+            }
+        }
+    });
+}
+
+// 初始化分页选择器
+function initializePaginationSelectors() {
+    // 设置默认值为20
+    const dashboardSelect = document.getElementById('pageSizeSelect');
+    const manageSelect = document.getElementById('managePageSizeSelect');
+    
+    if (dashboardSelect) {
+        dashboardSelect.value = itemsPerPage.toString();
+    }
+    
+    if (manageSelect) {
+        manageSelect.value = itemsPerPage.toString();
+    }
 }
 
 // 处理修改密码
@@ -1143,17 +1487,63 @@ async function saveTelegramSettings() {
     }
 }
 
+// 保存监控设置
+async function saveMonitorSettings() {
+    const checkInterval = parseInt(document.getElementById('checkIntervalInput').value);
+    const concurrentLimit = parseInt(document.getElementById('concurrentLimitInput').value);
+    const timeout = parseInt(document.getElementById('timeoutInput').value);
+    
+    // 验证参数
+    if (!checkInterval || checkInterval < 1) {
+        showNotification('检查间隔必须大于0分钟', 'error');
+        return;
+    }
+    
+    if (!concurrentLimit || concurrentLimit < 1 || concurrentLimit > 200) {
+        showNotification('并发限制必须在1-200之间', 'error');
+        return;
+    }
+    
+    if (!timeout || timeout < 1 || timeout > 120) {
+        showNotification('超时时间必须在1-120秒之间', 'error');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/settings/monitor', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                check_interval: checkInterval * 60, // 转换为秒
+                concurrent_limit: concurrentLimit,
+                timeout: timeout
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            showNotification(result.message || '监控设置保存成功', 'success');
+        } else {
+            showNotification(result.error || result.message || '保存监控设置失败', 'error');
+        }
+    } catch (error) {
+        showNotification('保存监控设置失败: ' + error.message, 'error');
+    }
+}
+
 // 测试邮件设置
 async function testEmailSettings() {
     try {
         showNotification('正在发送测试邮件...', 'info');
         const response = await fetch('/api/test/email', { method: 'POST' });
+        const result = await response.json();
         
-        if (response.ok) {
-            showNotification('测试邮件发送成功', 'success');
+        // 判断是否成功
+        if (result.status === 'success') {
+            showNotification(result.message, 'success');
         } else {
-            const result = await response.json();
-            showNotification(result.error || '测试邮件发送失败', 'error');
+            showNotification(result.message, 'error');
         }
     } catch (error) {
         showNotification('测试邮件发送失败: ' + error.message, 'error');
@@ -1165,12 +1555,13 @@ async function testTelegramSettings() {
     try {
         showNotification('正在发送测试Telegram消息...', 'info');
         const response = await fetch('/api/test/telegram', { method: 'POST' });
+        const result = await response.json();
         
-        if (response.ok) {
-            showNotification('测试Telegram消息发送成功', 'success');
+        // 判断是否成功
+        if (result.status === 'success') {
+            showNotification(result.message, 'success');
         } else {
-            const result = await response.json();
-            showNotification(result.error || '测试Telegram消息发送失败', 'error');
+            showNotification(result.message, 'error');
         }
     } catch (error) {
         showNotification('测试Telegram消息发送失败: ' + error.message, 'error');
@@ -1191,6 +1582,8 @@ function displayDomainsWithPagination() {
     tableBody.innerHTML = '';
     
     // 显示域名
+    const totalFiltered = domainsDataTotalFiltered(domains.length);
+
     if (domains.length === 0) {
         if (totalDomains === 0) {
             // 完全没有数据
@@ -1213,13 +1606,21 @@ function displayDomainsWithPagination() {
     elements.emptyState?.classList.add('hidden');
     
     // 渲染分页数据（服务器端分页）
-    domains.forEach(domain => {
-        const row = createDomainRow(domain);
-        tableBody.appendChild(row);
+    console.log('[分页调试] 准备渲染域名数量:', domains.length, '域名列表:', domains.map(d => d.name));
+    let renderedCount = 0;
+    domains.forEach((domain, index) => {
+        try {
+            const row = createDomainRow(domain);
+            tableBody.appendChild(row);
+            renderedCount++;
+        } catch (error) {
+            console.error('[渲染错误] 域名', domain.name, '渲染失败:', error);
+        }
     });
+    console.log('[分页调试] 实际渲染域名数量:', renderedCount);
     
     // 更新分页信息
-    updatePaginationInfo('dashboard');
+    updatePaginationInfo('dashboard', totalFiltered);
 }
 
 // 带分页的显示管理域名（服务器端分页）
@@ -1258,9 +1659,11 @@ function displayManageDomainsWithPagination() {
         row.className = 'domain-item';
         row.style.backgroundColor = 'transparent';
         const domainName = domain.name || domain;
+        // 使用添加时间而不是注册时间
+        const addedAt = formatDateTime(domain.added_at);
         row.innerHTML = `
             <td style="background-color: transparent;">${domainName}</td>
-            <td style="background-color: transparent;">${new Date().toLocaleDateString()}</td>
+            <td style="background-color: transparent;">${addedAt}</td>
             <td style="background-color: transparent;"><span class="badge badge-primary">监控中</span></td>
             <td style="background-color: transparent;">
                 <button class="btn btn-sm btn-error" onclick="removeDomain('${domainName}')">
@@ -1290,16 +1693,18 @@ function displayManageDomainsWithPagination() {
     });
     
     // 更新分页信息
-    updatePaginationInfo('manage');
+    updatePaginationInfo('manage', domains.length);
 }
 
 // 更新分页信息
-function updatePaginationInfo(type) {
+function updatePaginationInfo(type, totalFiltered) {
     if (type === 'dashboard') {
         const currentItemCount = domains.length;
-        const startIndex = totalDomains > 0 ? (dashboardCurrentPage - 1) * itemsPerPage + 1 : 0;
+        const startIndex = totalFiltered > 0 ? (dashboardCurrentPage - 1) * itemsPerPage + 1 : 0;
         const endIndex = startIndex + currentItemCount - 1;
-        const totalPages = Math.ceil(totalDomains / itemsPerPage);
+        const totalPages = Math.ceil(totalFiltered / itemsPerPage);
+        
+        console.log('[分页调试] 当前页:', dashboardCurrentPage, '每页数量:', itemsPerPage, '当前页项目数:', currentItemCount, '总过滤数:', totalFiltered, '总数:', totalDomains);
         
         document.getElementById('startIndex').textContent = startIndex;
         document.getElementById('endIndex').textContent = endIndex;
@@ -1308,7 +1713,7 @@ function updatePaginationInfo(type) {
         
         document.getElementById('prevPageBtn').disabled = dashboardCurrentPage === 1;
         document.getElementById('nextPageBtn').disabled = dashboardCurrentPage >= totalPages;
-        document.getElementById('paginationContainer').style.display = totalDomains > itemsPerPage ? 'flex' : 'none';
+        document.getElementById('paginationContainer').style.display = totalFiltered > itemsPerPage ? 'flex' : 'none';
         
     } else if (type === 'manage') {
         const currentItemCount = domains.length;
@@ -1326,3 +1731,91 @@ function updatePaginationInfo(type) {
         document.getElementById('managePaginationContainer').style.display = totalManageDomains > itemsPerPage ? 'flex' : 'none';
     }
 }
+
+function domainsDataTotalFiltered(fallback) {
+    // 服务器返回 total_filtered，若没有则用当前长度
+    if (typeof window.__lastTotalFiltered === 'number') {
+        return window.__lastTotalFiltered;
+    }
+    return fallback;
+}
+
+// 移动端dropdown控制
+function closeMobileDropdown() {
+    const dropdown = document.getElementById('mobile-dropdown');
+    const menuBtn = document.getElementById('mobile-menu-btn');
+    if (dropdown && menuBtn) {
+        // 移除焦点以关闭dropdown
+        menuBtn.blur();
+        dropdown.blur();
+    }
+}
+// 版本比较函数
+function compareVersions(v1, v2) {
+    const cleanV1 = v1.replace(/^v/, '');
+    const cleanV2 = v2.replace(/^v/, '');
+    const parts1 = cleanV1.split('.').map(Number);
+    const parts2 = cleanV2.split('.').map(Number);
+    for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+        const num1 = parts1[i] || 0;
+        const num2 = parts2[i] || 0;
+        if (num1 > num2) return 1;
+        if (num1 < num2) return -1;
+    }
+    return 0;
+}
+
+// 检查更新
+async function checkForUpdates() {
+    try {
+        const response = await fetch('/api/check-update');
+        if (!response.ok) {
+            console.warn('检查更新失败');
+            return;
+        }
+        const data = await response.json();
+        
+        // 更新页脚版本号显示
+        if (data.currentVersion) {
+            const versionElement = document.getElementById('app-version');
+            if (versionElement) {
+                versionElement.textContent = data.currentVersion;
+            }
+        }
+        
+        if (data.error) {
+            console.warn('检查更新错误:', data.error);
+            return;
+        }
+        
+        // 检查是否在7天内已经提示过
+        const lastDismissed = localStorage.getItem('updateDismissed');
+        if (lastDismissed) {
+            const dismissedTime = new Date(lastDismissed);
+            const now = new Date();
+            const daysDiff = (now - dismissedTime) / (1000 * 60 * 60 * 24);
+            if (daysDiff < 7) {
+                console.log('更新提示已在7天内关闭，跳过检查');
+                return;
+            }
+        }
+        
+        const hasUpdate = compareVersions(data.latestVersion, data.currentVersion) > 0;
+        if (hasUpdate) {
+            document.getElementById('current-version').textContent = data.currentVersion;
+            document.getElementById('latest-version').textContent = data.latestVersion;
+            if (data.publishedAt) {
+                const publishDate = new Date(data.publishedAt);
+                document.getElementById('publish-date').textContent = publishDate.toLocaleString('zh-CN', dateTimeOptions);
+            }
+            const modal = document.getElementById('updateModal');
+            modal.showModal();
+            document.getElementById('update-dismiss-btn').addEventListener('click', function() {
+                localStorage.setItem('updateDismissed', new Date().toISOString());
+            }, { once: true });
+        }
+    } catch (error) {
+        console.error('检查更新时发生错误:', error);
+    }
+}
+

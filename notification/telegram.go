@@ -67,6 +67,12 @@ func (t *TelegramNotifier) IsEnabled() bool {
 	return t.enabled && t.config.Enabled
 }
 
+// UpdateConfig 更新配置
+func (t *TelegramNotifier) UpdateConfig(cfg config.TelegramConfig) {
+	t.config = cfg
+	t.enabled = cfg.Enabled
+}
+
 // GetType 获取通知器类型
 func (t *TelegramNotifier) GetType() string {
 	return "telegram"
@@ -84,13 +90,16 @@ func (t *TelegramNotifier) Test() error {
 	}
 
 	// 发送测试消息
-	testMessage := `🧪 *域名监控系统测试*
+	testMessage := `
+     Telegram 通知测试
 
 这是一条测试消息，用于验证Telegram通知功能是否正常工作。
 
 时间: ` + time.Now().Format("2006-01-02 15:04:05") + `
 
-如果您收到这条消息，说明Telegram通知配置正确。`
+如果您收到这条消息，说明Telegram通知配置正确。
+
+来自 Puff`
 
 	return t.sendToTelegram(testMessage)
 }
@@ -116,39 +125,148 @@ func (t *TelegramNotifier) validateConfig() error {
 	return nil
 }
 
-// formatMessage 格式化Telegram消息
+// formatMessage 格式化Telegram消息（简洁文本模板）
 func (t *TelegramNotifier) formatMessage(subject, message string) string {
-	var formatted strings.Builder
+	// 检查是否为批量通知
+	if strings.Contains(message, "检测到") && strings.Contains(message, "个域名状态发生变化") {
+		return t.formatBatchMessage(subject, message)
+	}
 
-	// 使用Markdown格式
-	formatted.WriteString(fmt.Sprintf("*%s*\n\n", t.escapeMarkdown(subject)))
-
-	// 处理消息内容
+	// 解析消息内容
 	lines := strings.Split(message, "\n")
+	domain := ""
+	timestamp := ""
+	statusChange := ""
+	statusInfo := ""
+	oldStatus := ""
+	newStatus := ""
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" {
-			formatted.WriteString("\n")
-			continue
-		}
-
-		// 特殊格式处理
-		if strings.Contains(line, "域名:") {
-			formatted.WriteString(fmt.Sprintf("*%s*\n", t.escapeMarkdown(line)))
-		} else if strings.Contains(line, "时间:") {
-			formatted.WriteString(fmt.Sprintf("时间: %s\n", t.escapeMarkdown(line)))
-		} else if strings.Contains(line, "状态:") {
-			formatted.WriteString(fmt.Sprintf("状态: %s\n", t.escapeMarkdown(line)))
-		} else if strings.Contains(line, "状态变化:") {
-			formatted.WriteString(fmt.Sprintf("变化: *%s*\n", t.escapeMarkdown(line)))
-		} else if strings.Contains(line, "错误信息:") {
-			formatted.WriteString(fmt.Sprintf("错误: `%s`\n", t.escapeMarkdown(line)))
-		} else if strings.HasPrefix(line, "---") {
-			formatted.WriteString("━━━━━━━━━━━━━━━━━━━━\n")
-		} else {
-			formatted.WriteString(fmt.Sprintf("%s\n", t.escapeMarkdown(line)))
+		if strings.HasPrefix(line, "域名: ") {
+			domain = strings.TrimPrefix(line, "域名: ")
+		} else if strings.HasPrefix(line, "时间: ") {
+			timestamp = strings.TrimPrefix(line, "时间: ")
+		} else if strings.HasPrefix(line, "状态变化: ") {
+			statusChange = strings.TrimPrefix(line, "状态变化: ")
+			// 解析 oldStatus -> newStatus
+			parts := strings.Split(statusChange, "→")
+			if len(parts) == 2 {
+				oldStatus = strings.TrimSpace(parts[0])
+				newStatus = strings.TrimSpace(parts[1])
+			}
+		} else if strings.HasPrefix(line, "状态: ") {
+			statusInfo = strings.TrimPrefix(line, "状态: ")
 		}
 	}
+
+	var formatted strings.Builder
+
+	// 标题
+	formatted.WriteString("\n")
+	formatted.WriteString("       域名状态变化通知\n")
+	formatted.WriteString("\n\n")
+
+	// 域名信息
+	if domain != "" {
+		formatted.WriteString(fmt.Sprintf("域名: %s\n", domain))
+	}
+
+	// 状态变化（翻译成中文）
+	if oldStatus != "" && newStatus != "" {
+		translatedOld := translateStatus(oldStatus)
+		translatedNew := translateStatus(newStatus)
+		formatted.WriteString(fmt.Sprintf("\n旧状态: %s\n", translatedOld))
+		formatted.WriteString(fmt.Sprintf("新状态: %s\n", translatedNew))
+		formatted.WriteString(fmt.Sprintf("变化: %s → %s\n", translatedOld, translatedNew))
+	} else if statusInfo != "" {
+		formatted.WriteString(fmt.Sprintf("\n状态: %s\n", statusInfo))
+	}
+
+	// 时间
+	if timestamp != "" {
+		formatted.WriteString(fmt.Sprintf("\n时间: %s\n", timestamp))
+	}
+
+	// 底部
+	formatted.WriteString("\n\n")
+	formatted.WriteString("来自 Puff\n")
+
+	return formatted.String()
+}
+
+// formatBatchMessage 格式化批量通知消息
+func (t *TelegramNotifier) formatBatchMessage(subject, message string) string {
+	// 解析消息内容
+	lines := strings.Split(message, "\n")
+	timestamp := ""
+	domainChanges := []struct {
+		Domain    string
+		OldStatus string
+		NewStatus string
+	}{}
+
+	// 解析时间和域名变化
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "时间: ") {
+			timestamp = strings.TrimPrefix(line, "时间: ")
+		} else if strings.Contains(line, ". ") && !strings.HasPrefix(line, "---") {
+			// 解析域名行 "1. test1.puff"
+			parts := strings.SplitN(line, ". ", 2)
+			if len(parts) == 2 {
+				domain := parts[1]
+				// 下一行应该是状态变化
+				if i+1 < len(lines) {
+					nextLine := strings.TrimSpace(lines[i+1])
+					if strings.HasPrefix(nextLine, "状态变化: ") {
+						statusChangeStr := strings.TrimPrefix(nextLine, "状态变化: ")
+						statusParts := strings.Split(statusChangeStr, "→")
+						if len(statusParts) == 2 {
+							domainChanges = append(domainChanges, struct {
+								Domain    string
+								OldStatus string
+								NewStatus string
+							}{
+								Domain:    domain,
+								OldStatus: strings.TrimSpace(statusParts[0]),
+								NewStatus: strings.TrimSpace(statusParts[1]),
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	var formatted strings.Builder
+
+	// 标题
+	formatted.WriteString("\n")
+	formatted.WriteString(fmt.Sprintf("  域名状态变化通知 (%d个)\n", len(domainChanges)))
+	formatted.WriteString("\n\n")
+
+	// 时间
+	if timestamp != "" {
+		formatted.WriteString(fmt.Sprintf("时间: %s\n\n", timestamp))
+	}
+
+	// 列出所有域名变化
+	for i, change := range domainChanges {
+		translatedOld := translateStatus(change.OldStatus)
+		translatedNew := translateStatus(change.NewStatus)
+
+		formatted.WriteString(fmt.Sprintf("%d. %s\n", i+1, change.Domain))
+		formatted.WriteString(fmt.Sprintf("   %s → %s\n", translatedOld, translatedNew))
+
+		if i < len(domainChanges)-1 {
+			formatted.WriteString("\n")
+		}
+	}
+
+	// 底部
+	formatted.WriteString("\n\n")
+	formatted.WriteString("来自 Puff\n")
 
 	return formatted.String()
 }
@@ -170,11 +288,10 @@ func (t *TelegramNotifier) sendToTelegram(message string) error {
 	// 构建API URL
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.config.BotToken)
 
-	// 构建消息
+	// 构建消息（不使用Markdown格式，使用纯文本）
 	telegramMsg := TelegramMessage{
-		ChatID:    t.config.ChatID,
-		Text:      message,
-		ParseMode: "MarkdownV2",
+		ChatID: t.config.ChatID,
+		Text:   message,
 	}
 
 	// 编码为JSON
@@ -258,10 +375,4 @@ func (t *TelegramNotifier) GetChatInfo() (map[string]interface{}, error) {
 // SetEnabled 设置启用状态
 func (t *TelegramNotifier) SetEnabled(enabled bool) {
 	t.enabled = enabled
-}
-
-// UpdateConfig 更新配置
-func (t *TelegramNotifier) UpdateConfig(cfg config.TelegramConfig) {
-	t.config = cfg
-	t.enabled = cfg.Enabled
 }

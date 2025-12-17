@@ -31,7 +31,7 @@ type SessionStore struct {
 func NewSessionStore() *SessionStore {
 	store := &SessionStore{
 		sessions: make(map[string]*Session),
-		maxAge:   24 * time.Hour, // 默认24小时过期
+		maxAge:   30 * 24 * time.Hour, // 默认30天过期
 	}
 
 	// 启动清理协程
@@ -84,9 +84,9 @@ func (s *SessionStore) DeleteSession(sessionID string) {
 }
 
 // UpdateLastAccess 更新最后访问时间
-func (s *Session) UpdateLastAccess() {
+func (s *Session) UpdateLastAccess(maxAge time.Duration) {
 	s.LastAccess = time.Now()
-	s.ExpiresAt = time.Now().Add(24 * time.Hour) // 延长过期时间
+	s.ExpiresAt = time.Now().Add(maxAge) // 按配置延长过期时间
 }
 
 // IsExpired 检查会话是否过期

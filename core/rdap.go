@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -63,22 +64,29 @@ type RDAPNameServer struct {
 
 // QueryRDAP 执行RDAP查询
 func (r *RDAPClient) QueryRDAP(domain, serverURL string) (*RDAPResponse, error) {
+	if strings.TrimSpace(serverURL) == "" {
+		return nil, fmt.Errorf("RDAP服务器地址为空")
+	}
+
 	// 构建查询URL
 	url := strings.TrimSuffix(serverURL, "/") + "/domain/" + domain
 
 	// 创建HTTP请求
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
+		log.Printf("RDAP build request failed domain=%s url=%s err=%v", domain, url, err)
 		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
 
 	// 设置请求头
 	req.Header.Set("Accept", "application/rdap+json")
-	req.Header.Set("User-Agent", "Puff-Domain-Monitor/1.0")
+	// 使用标准浏览器User-Agent，某些RDAP服务器（如ch/li）会拒绝非浏览器请求
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 	// 执行请求
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
+		log.Printf("RDAP request failed domain=%s url=%s err=%v", domain, url, err)
 		return nil, fmt.Errorf("执行HTTP请求失败: %v", err)
 	}
 	defer resp.Body.Close()
@@ -92,6 +100,7 @@ func (r *RDAPClient) QueryRDAP(domain, serverURL string) (*RDAPResponse, error) 
 	// 检查HTTP状态码
 	if resp.StatusCode == 404 {
 		// 404通常表示域名不存在
+		// RDAP 404 - 域名不存在，这是正常情况
 		return &RDAPResponse{
 			ErrorCode:   404,
 			Title:       "Not Found",
@@ -99,8 +108,14 @@ func (r *RDAPClient) QueryRDAP(domain, serverURL string) (*RDAPResponse, error) 
 		}, nil
 	}
 
+	if resp.StatusCode == 429 {
+		// 429 Too Many Requests - 限流错误，返回特殊错误以便重试
+		return nil, fmt.Errorf("RDAP服务器限流(429)，请稍后重试")
+	}
+
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP请求失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+		log.Printf("RDAP non-200 domain=%s url=%s status=%d", domain, url, resp.StatusCode)
+		return nil, fmt.Errorf("HTTP请求失败，状态码: %d", resp.StatusCode)
 	}
 
 	// 解析JSON响应
@@ -112,12 +127,79 @@ func (r *RDAPClient) QueryRDAP(domain, serverURL string) (*RDAPResponse, error) 
 	return &rdapResp, nil
 }
 
+// QueryRDAPWithRaw 执行RDAP查询并返回原始JSON数据
+func (r *RDAPClient) QueryRDAPWithRaw(domain, serverURL string) (*RDAPResponse, string, error) {
+	if strings.TrimSpace(serverURL) == "" {
+		return nil, "", fmt.Errorf("RDAP服务器地址为空")
+	}
+
+	// 构建查询URL
+	url := strings.TrimSuffix(serverURL, "/") + "/domain/" + domain
+
+	// 创建HTTP请求
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Printf("RDAP build request failed domain=%s url=%s err=%v", domain, url, err)
+		return nil, "", fmt.Errorf("创建HTTP请求失败: %v", err)
+	}
+
+	// 设置请求头
+	req.Header.Set("Accept", "application/rdap+json")
+	// 使用标准浏览器User-Agent，某些RDAP服务器（如ch/li）会拒绝非浏览器请求
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	// 执行请求
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		log.Printf("RDAP request failed domain=%s url=%s err=%v", domain, url, err)
+		return nil, "", fmt.Errorf("执行HTTP请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 读取响应体
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("读取响应体失败: %v", err)
+	}
+
+	rawJSON := string(body)
+
+	// 检查HTTP状态码
+	if resp.StatusCode == 404 {
+		// 404通常表示域名不存在
+		return &RDAPResponse{
+			ErrorCode:   404,
+			Title:       "Not Found",
+			Description: []string{"Domain not found"},
+		}, rawJSON, nil
+	}
+
+	if resp.StatusCode == 429 {
+		// 429 Too Many Requests - 限流错误，返回特殊错误以便重试
+		return nil, "", fmt.Errorf("RDAP服务器限流(429)，请稍后重试")
+	}
+
+	if resp.StatusCode != 200 {
+		log.Printf("RDAP non-200 domain=%s url=%s status=%d", domain, url, resp.StatusCode)
+		return nil, rawJSON, fmt.Errorf("HTTP请求失败，状态码: %d", resp.StatusCode)
+	}
+
+	// 解析JSON响应
+	var rdapResp RDAPResponse
+	if err := json.Unmarshal(body, &rdapResp); err != nil {
+		return nil, rawJSON, fmt.Errorf("解析JSON响应失败: %v", err)
+	}
+
+	return &rdapResp, rawJSON, nil
+}
+
 // ParseRDAPResponse 解析RDAP响应
-func (r *RDAPClient) ParseRDAPResponse(domain string, rdapResp *RDAPResponse) *DomainInfo {
+func (r *RDAPClient) ParseRDAPResponse(domain string, rdapResp *RDAPResponse, rawJSON string) *DomainInfo {
 	info := &DomainInfo{
 		Name:        domain,
 		LastChecked: time.Now(),
 		QueryMethod: "rdap",
+		WhoisRaw:    rawJSON, // 保存原始RDAP JSON数据
 	}
 
 	// 检查是否为错误响应
@@ -138,6 +220,38 @@ func (r *RDAPClient) ParseRDAPResponse(domain string, rdapResp *RDAPResponse) *D
 	// 解析名称服务器
 	info.NameServers = r.parseRDAPNameServers(rdapResp.NameServers)
 
+	// 如果状态仍未知，尝试根据描述/标题判断可注册
+	if info.Status == StatusUnknown {
+		desc := strings.ToLower(strings.Join(rdapResp.Description, " "))
+		title := strings.ToLower(rdapResp.Title)
+		if strings.Contains(title, "not found") || strings.Contains(desc, "not found") || strings.Contains(desc, "no match") || strings.Contains(desc, "domain not found") {
+			info.Status = StatusAvailable
+		}
+	}
+
+	// 最终状态校验：只有在状态未知且有注册信息时，才设置为已注册
+	// 不要覆盖已经正确检测到的特殊状态（如宽限期、赎回期、待删除等）
+	if info.Status == StatusUnknown {
+		hasValidRegistrar := info.Registrar != "" && !strings.Contains(info.Registrar, "不支持")
+		hasNameServers := len(info.NameServers) > 0
+		hasExpiryDate := info.ExpiryDate != nil
+		hasCreatedDate := info.CreatedDate != nil
+		hasEvents := len(rdapResp.Events) > 0
+
+		// 如果有任何实际的注册信息，则认定为已注册
+		if hasValidRegistrar || hasNameServers || hasExpiryDate || hasCreatedDate || hasEvents {
+			info.Status = StatusRegistered
+		} else {
+			// 没有任何注册信息且状态未知时，认定为可注册
+			info.Status = StatusAvailable
+		}
+	}
+
+	// 仍未知则输出原始 RDAP 信息便于排查
+	if info.Status == StatusUnknown {
+		log.Printf("RDAP raw unknown %s: status=%v title=%s", domain, rdapResp.Status, rdapResp.Title)
+	}
+
 	return info
 }
 
@@ -153,37 +267,23 @@ func (r *RDAPClient) parseRDAPStatus(statuses []string) DomainStatus {
 		statusMap[strings.ToLower(status)] = true
 	}
 
-	// 检查重要状态（优先级从高到低）
+	// 赎回期
 	if statusMap["redemption period"] || statusMap["redemptionperiod"] {
 		return StatusRedemption
 	}
 
+	// 待删除
 	if statusMap["pending delete"] || statusMap["pendingdelete"] {
 		return StatusPendingDelete
 	}
 
-	if statusMap["expired"] {
-		return StatusExpired
+	// 宽限/续费
+	if statusMap["renew period"] || statusMap["auto renew period"] || statusMap["expired"] {
+		return StatusGrace
 	}
 
-	if statusMap["client hold"] || statusMap["server hold"] ||
-		statusMap["registrar hold"] || statusMap["registry hold"] {
-		return StatusHold
-	}
-
-	if statusMap["client transfer prohibited"] || statusMap["server transfer prohibited"] ||
-		statusMap["clienttransferprohibited"] || statusMap["servertransferprohibited"] {
-		return StatusTransferLocked
-	}
-
-	// 检查活跃状态
-	if statusMap["ok"] || statusMap["active"] || statusMap["client update prohibited"] ||
-		statusMap["server update prohibited"] || statusMap["client delete prohibited"] ||
-		statusMap["server delete prohibited"] {
-		return StatusRegistered
-	}
-
-	return StatusRegistered // 默认为已注册
+	// 其余视为已注册
+	return StatusRegistered
 }
 
 // parseRDAPRegistrar 解析注册商信息

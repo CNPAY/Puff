@@ -3,7 +3,8 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"os"
+	"log"
+	"strings"
 	"sync"
 )
 
@@ -33,96 +34,126 @@ type DetectionPatterns struct {
 	HoldPatterns          []string `json:"hold_patterns"`
 	TransferLockPatterns  []string `json:"transfer_lock_patterns"`
 	RegisteredPatterns    []string `json:"registered_patterns"`
+	GracePatterns         []string `json:"grace_patterns"`
 }
 
 var (
 	serversConfig  map[string]TLDServers
 	patternsConfig DetectionPatterns
-	configsLoaded  bool
 	configMutex    sync.RWMutex
+	configLoaded   bool
 )
 
-// LoadServerConfigs 加载服务器配置
+// LoadServerConfigs 加载服务器配置（从嵌入的文件读取）
 func LoadServerConfigs() error {
 	configMutex.Lock()
 	defer configMutex.Unlock()
 
-	if configsLoaded {
-		return nil
-	}
-
-	// 加载服务器配置
-	serversFile, err := os.ReadFile("config/servers.json")
+	// 读取嵌入的 servers.json 文件
+	sData, err := GetEmbeddedFile("servers.json")
 	if err != nil {
-		return fmt.Errorf("读取服务器配置文件失败: %v", err)
+		return fmt.Errorf("读取 servers.json 失败: %v", err)
+	}
+	if err := json.Unmarshal(sData, &serversConfig); err != nil {
+		return fmt.Errorf("解析 servers.json 失败: %v", err)
 	}
 
-	if err := json.Unmarshal(serversFile, &serversConfig); err != nil {
-		return fmt.Errorf("解析服务器配置失败: %v", err)
-	}
-
-	// 加载检测模式配置
-	patternsFile, err := os.ReadFile("config/detection_patterns.json")
+	// 读取嵌入的 detection_patterns.json 文件
+	pData, err := GetEmbeddedFile("detection_patterns.json")
 	if err != nil {
-		return fmt.Errorf("读取检测模式配置文件失败: %v", err)
+		return fmt.Errorf("读取 detection_patterns.json 失败: %v", err)
+	}
+	if err := json.Unmarshal(pData, &patternsConfig); err != nil {
+		return fmt.Errorf("解析 detection_patterns.json 失败: %v", err)
 	}
 
-	if err := json.Unmarshal(patternsFile, &patternsConfig); err != nil {
-		return fmt.Errorf("解析检测模式配置失败: %v", err)
+	if len(patternsConfig.AvailablePatterns) == 0 {
+		return fmt.Errorf("detection_patterns.json 中 available_patterns 为空，配置无效")
 	}
 
-	configsLoaded = true
+	configLoaded = true
 	return nil
 }
 
+// ReloadServerConfigs 重新加载服务器配置（用于TLD更新后刷新）
+func ReloadServerConfigs() error {
+	return LoadServerConfigs()
+}
+
 // GetWhoisServerByTLD 根据TLD获取WHOIS服务器
-func GetWhoisServerByTLD(tld string) (WhoisServer, bool) {
-	if err := LoadServerConfigs(); err != nil {
-		return WhoisServer{}, false
+func GetWhoisServerByTLD(domain string) (WhoisServer, bool) {
+	if !configLoaded {
+		if err := LoadServerConfigs(); err != nil {
+			log.Printf("Config: failed to load server configs: %v", err)
+			return WhoisServer{}, false
+		}
 	}
 
 	configMutex.RLock()
 	defer configMutex.RUnlock()
 
-	server, exists := serversConfig[tld]
-	if !exists {
+	key := findBestTLD(domain)
+	if key == "" {
+		log.Printf("Config: no TLD match found for domain=%s", domain)
 		return WhoisServer{}, false
 	}
 
-	return server.Whois, true
+	server := serversConfig[key].Whois
+	// WHOIS服务器已找到
+
+	if server.Server == "" {
+		log.Printf("Config: empty WHOIS server for domain=%s tld=%s", domain, key)
+		return WhoisServer{}, false
+	}
+
+	return server, true
 }
 
 // GetRDAPServerByTLD 根据TLD获取RDAP服务器
-func GetRDAPServerByTLD(tld string) (RDAPServer, bool) {
-	if err := LoadServerConfigs(); err != nil {
-		return RDAPServer{}, false
+func GetRDAPServerByTLD(domain string) (RDAPServer, bool) {
+	if !configLoaded {
+		if err := LoadServerConfigs(); err != nil {
+			return RDAPServer{}, false
+		}
 	}
 
 	configMutex.RLock()
 	defer configMutex.RUnlock()
 
-	server, exists := serversConfig[tld]
-	if !exists {
+	key := findBestTLD(domain)
+	if key == "" {
 		return RDAPServer{}, false
 	}
 
-	return server.RDAP, true
+	srv := serversConfig[key].RDAP
+	if strings.TrimSpace(srv.Server) == "" {
+		return RDAPServer{}, false
+	}
+	return srv, true
 }
 
 // GetDetectionPatterns 获取检测模式
 func GetDetectionPatterns() DetectionPatterns {
-	LoadServerConfigs() // 确保配置已加载
+	if !configLoaded {
+		if err := LoadServerConfigs(); err != nil {
+			log.Printf("Config: failed to load detection patterns: %v", err)
+		}
+	}
 
 	configMutex.RLock()
 	defer configMutex.RUnlock()
+
+	// 检测模式已加载
 
 	return patternsConfig
 }
 
 // GetSupportedTLDs 获取支持的TLD列表
 func GetSupportedTLDs() []string {
-	if err := LoadServerConfigs(); err != nil {
-		return []string{}
+	if !configLoaded {
+		if err := LoadServerConfigs(); err != nil {
+			return []string{}
+		}
 	}
 
 	configMutex.RLock()
@@ -136,32 +167,29 @@ func GetSupportedTLDs() []string {
 	return tlds
 }
 
-// AddOrUpdateTLD 添加或更新TLD配置
-func AddOrUpdateTLD(tld string, whoisServer, rdapServer string, whoisPort int) error {
-	if err := LoadServerConfigs(); err != nil {
-		return err
+// FindBestTLD 对外暴露最长匹配
+func FindBestTLD(domain string) string {
+	if !configLoaded {
+		if err := LoadServerConfigs(); err != nil {
+			return ""
+		}
 	}
-
-	serversConfig[tld] = TLDServers{
-		Whois: WhoisServer{
-			Server: whoisServer,
-			Port:   whoisPort,
-		},
-		RDAP: RDAPServer{
-			Server: rdapServer,
-		},
-	}
-
-	// 保存到文件
-	return SaveServerConfigs()
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	return findBestTLD(domain)
 }
 
-// SaveServerConfigs 保存服务器配置到文件
-func SaveServerConfigs() error {
-	data, err := json.MarshalIndent(serversConfig, "", "  ")
-	if err != nil {
-		return fmt.Errorf("序列化服务器配置失败: %v", err)
+// findBestTLD 在配置中匹配最长后缀
+func findBestTLD(domain string) string {
+	domain = strings.ToLower(domain)
+	best := ""
+	for tld := range serversConfig {
+		lt := strings.ToLower(tld)
+		if domain == lt || strings.HasSuffix(domain, "."+lt) {
+			if len(lt) > len(best) {
+				best = lt
+			}
+		}
 	}
-
-	return os.WriteFile("config/servers.json", data, 0644)
+	return best
 }
