@@ -1,6 +1,7 @@
 package core
 
 import (
+	"Puff/logger"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,9 +19,7 @@ type RDAPClient struct {
 // NewRDAPClient 创建新的RDAP客户端
 func NewRDAPClient(timeout time.Duration) *RDAPClient {
 	return &RDAPClient{
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		httpClient: GetProxyHTTPClient(timeout),
 	}
 }
 
@@ -226,6 +225,19 @@ func (r *RDAPClient) ParseRDAPResponse(domain string, rdapResp *RDAPResponse, ra
 		title := strings.ToLower(rdapResp.Title)
 		if strings.Contains(title, "not found") || strings.Contains(desc, "not found") || strings.Contains(desc, "no match") || strings.Contains(desc, "domain not found") {
 			info.Status = StatusAvailable
+		}
+	}
+
+	// 额外校验：如果判定为可注册，但存在关键注册信息，则认为是误报
+	if info.Status == StatusAvailable {
+		hasValidRegistrar := info.Registrar != "" && !strings.Contains(info.Registrar, "不支持")
+		hasExpiryDate := info.ExpiryDate != nil
+		hasCreatedDate := info.CreatedDate != nil
+		hasEvents := len(rdapResp.Events) > 0
+
+		if hasValidRegistrar || hasExpiryDate || hasCreatedDate || hasEvents {
+			logger.Warn("域名 %s (RDAP) 被误判为可注册，检测到注册信息，修正为已注册", domain)
+			info.Status = StatusRegistered
 		}
 	}
 

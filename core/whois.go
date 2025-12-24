@@ -1,11 +1,14 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/net/proxy"
 
 	"Puff/config"
 	"Puff/logger"
@@ -27,7 +30,23 @@ func NewWhoisClient(timeout time.Duration) *WhoisClient {
 func (w *WhoisClient) QueryWhois(domain, server string, port int) (string, error) {
 	address := net.JoinHostPort(server, fmt.Sprintf("%d", port))
 
-	conn, err := net.DialTimeout("tcp", address, w.timeout)
+	dialer, err := GetProxyDialer()
+	if err != nil {
+		return "", fmt.Errorf("获取代理配置失败: %v", err)
+	}
+
+	var conn net.Conn
+
+	// 使用带超时的 Context
+	ctx, cancel := context.WithTimeout(context.Background(), w.timeout)
+	defer cancel()
+
+	if d, ok := dialer.(proxy.ContextDialer); ok {
+		conn, err = d.DialContext(ctx, "tcp", address)
+	} else {
+		conn, err = dialer.Dial("tcp", address)
+	}
+
 	if err != nil {
 		return "", fmt.Errorf("连接WHOIS服务器失败: %v", err)
 	}
@@ -100,6 +119,19 @@ func (w *WhoisClient) ParseWhoisResponse(domain, response string) *DomainInfo {
 
 	// 解析名称服务器
 	info.NameServers = w.parseNameServers(response)
+
+	// 额外校验：如果判定为可注册，但存在关键注册信息，则认为是误报
+	if info.Status == StatusAvailable {
+		hasValidRegistrar := info.Registrar != "" && !strings.Contains(info.Registrar, "不支持")
+		hasExpiryDate := info.ExpiryDate != nil
+		hasCreatedDate := info.CreatedDate != nil
+
+		if hasValidRegistrar || hasExpiryDate || hasCreatedDate {
+			logger.Warn("域名 %s 被误判为可注册，检测到注册信息(注册商: %v, 创建日: %v, 过期日: %v)，修正为已注册",
+				domain, hasValidRegistrar, hasCreatedDate, hasExpiryDate)
+			info.Status = StatusRegistered
+		}
+	}
 
 	// 最终状态校验：只有在状态未知且有注册信息时，才设置为已注册
 	// 不要覆盖已经正确检测到的特殊状态（如宽限期、赎回期、待删除等）
@@ -370,6 +402,8 @@ func (w *WhoisClient) getSpecialDatePatterns(keywords []string) []string {
 				`(?i)Creation date\.+:\s*([^\r\n]+)`,
 				// .mo 格式
 				`(?i)Record created on\s+([^\r\n]+)`,
+				// .gg 格式
+				`(?i)Registered on\s+([^\r\n]+)`,
 			}...)
 		case "expiry date", "expires", "expiration date", "registry expiry date":
 			patterns = append(patterns, []string{
@@ -433,6 +467,8 @@ func (w *WhoisClient) getSpecialDatePatterns(keywords []string) []string {
 				`(?i)validity:\s*([^\r\n]+)`,
 				// .mo 格式
 				`(?i)Record expires on\s+([^\r\n]+)`,
+				// .im 格式
+				`(?i)Expiry Date:\s*([^\r\n]+)`,
 			}...)
 		case "updated date", "last updated", "modified":
 			patterns = append(patterns, []string{
@@ -475,6 +511,8 @@ func (w *WhoisClient) getSpecialDatePatterns(keywords []string) []string {
 				`(?i)Last Modified:\s*([^\r\n]+)`,
 				// .lv 格式
 				`(?i)Updated:\s*([^\r\n]+)`,
+				// .at 格式
+				`(?i)changed:\s*([^\r\n]+)`,
 			}...)
 		}
 	}
@@ -490,6 +528,14 @@ func (w *WhoisClient) parseDateTime(dateStr string) *time.Time {
 
 	// 移除时区信息如 (JST)
 	dateStr = regexp.MustCompile(`\s*\([^)]+\)\s*$`).ReplaceAllString(dateStr, "")
+
+	// 清理 .gg 格式: "17th April 2022 at 08:01:35.586" -> "17 April 2022 08:01:35.586"
+	if strings.Contains(dateStr, " at ") {
+		dateStr = strings.ReplaceAll(dateStr, " at ", " ")
+		// 移除 ordinal suffixes (st, nd, rd, th)
+		re := regexp.MustCompile(`(\d+)(st|nd|rd|th)\b`)
+		dateStr = re.ReplaceAllString(dateStr, "$1")
+	}
 
 	formats := []string{
 		// 标准ISO格式
@@ -598,6 +644,13 @@ func (w *WhoisClient) parseDateTime(dateStr string) *time.Time {
 		// .lv 格式 (yyyy-mm-ddTHH:MM:SS.ffffffZ)
 		"2025-12-15T12:12:32.295699+00:00",
 		"2006-01-02T15:04:05.999999+00:00",
+
+		// .at 格式
+		"20060102 15:04:05",
+
+		// .gg 格式
+		"2 January 2006 15:04:05.000",
+		"02 January 2006 15:04:05.000",
 	}
 
 	for _, format := range formats {

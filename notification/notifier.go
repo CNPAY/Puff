@@ -33,6 +33,7 @@ type NotificationEvent struct {
 	OldStatus string    `json:"old_status"` // 之前状态
 	Message   string    `json:"message"`    // 消息内容
 	Timestamp time.Time `json:"timestamp"`  // 时间戳
+	WhoisRaw  string    `json:"whois_raw"`  // 原始Whois信息
 }
 
 // NotificationManager 通知管理器
@@ -287,6 +288,17 @@ func (nm *NotificationManager) formatMessage(event NotificationEvent) string {
 
 	if event.Message != "" && event.Type != "error" {
 		message.WriteString(fmt.Sprintf("\n详细信息: %s\n", event.Message))
+	}
+
+	if event.WhoisRaw != "" {
+		message.WriteString("\n=== WHOIS/RDAP 信息 ===\n")
+		// 限制长度以免消息过长
+		if len(event.WhoisRaw) > 2000 {
+			message.WriteString(event.WhoisRaw[:2000] + "\n...(已截断)")
+		} else {
+			message.WriteString(event.WhoisRaw)
+		}
+		message.WriteString("\n")
 	}
 
 	message.WriteString("\n---\n")

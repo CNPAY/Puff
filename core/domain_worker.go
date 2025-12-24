@@ -189,7 +189,7 @@ func (w *DomainWorker) executeQuery() {
 		w.isFirstQuery = false
 	} else if previousStatus != StatusUnknown && previousStatus != info.Status {
 		// 状态变化，发送通知
-		w.notifyStatusChange(previousStatus, info.Status)
+		w.notifyStatusChange(previousStatus, info.Status, info)
 	}
 
 	// 更新最后状态
@@ -389,9 +389,15 @@ func (w *DomainWorker) getIntervalByStatus(status DomainStatus) time.Duration {
 }
 
 // notifyStatusChange 发送状态变化通知
-func (w *DomainWorker) notifyStatusChange(oldStatus, newStatus DomainStatus) {
+func (w *DomainWorker) notifyStatusChange(oldStatus, newStatus DomainStatus, info *DomainInfo) {
 	// 检查是否需要发送通知
 	if !w.notify {
+		return
+	}
+
+	// 如果是从查询失败状态恢复，不发送通知
+	if oldStatus == StatusError {
+		logger.Info("域名 %s 从失败状态恢复，不发送通知", w.domain)
 		return
 	}
 
@@ -402,11 +408,12 @@ func (w *DomainWorker) notifyStatusChange(oldStatus, newStatus DomainStatus) {
 	}
 
 	event := StatusChangeEvent{
-		Domain:    w.domain,
-		OldStatus: oldStatus,
-		NewStatus: newStatus,
-		Timestamp: time.Now(),
-		Message:   GetStatusChangeMessage(w.domain, oldStatus, newStatus),
+		Domain:     w.domain,
+		OldStatus:  oldStatus,
+		NewStatus:  newStatus,
+		Timestamp:  time.Now(),
+		Message:    GetStatusChangeMessage(w.domain, oldStatus, newStatus),
+		DomainInfo: info,
 	}
 
 	// 非阻塞发送

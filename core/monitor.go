@@ -234,11 +234,12 @@ func (m *Monitor) ForceCheck(domain string) (*DomainInfo, error) {
 		if statusInfo.ShouldNotify {
 			// 发送状态变化事件
 			event := StatusChangeEvent{
-				Domain:    domain,
-				OldStatus: previousStatus,
-				NewStatus: info.Status,
-				Timestamp: time.Now(),
-				Message:   GetStatusChangeMessage(domain, previousStatus, info.Status),
+				Domain:     domain,
+				OldStatus:  previousStatus,
+				NewStatus:  info.Status,
+				Timestamp:  time.Now(),
+				Message:    GetStatusChangeMessage(domain, previousStatus, info.Status),
+				DomainInfo: info,
 			}
 
 			// 发送到通知通道

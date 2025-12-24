@@ -171,11 +171,12 @@ func (d *DomainInfo) IsImportant() bool {
 
 // StatusChangeEvent 状态变化事件
 type StatusChangeEvent struct {
-	Domain    string       `json:"domain"`
-	OldStatus DomainStatus `json:"old_status"`
-	NewStatus DomainStatus `json:"new_status"`
-	Timestamp time.Time    `json:"timestamp"`
-	Message   string       `json:"message"`
+	Domain     string       `json:"domain"`
+	OldStatus  DomainStatus `json:"old_status"`
+	NewStatus  DomainStatus `json:"new_status"`
+	Timestamp  time.Time    `json:"timestamp"`
+	Message    string       `json:"message"`
+	DomainInfo *DomainInfo  `json:"domain_info,omitempty"` // 包含详细信息
 }
 
 // GetStatusChangeMessage 获取状态变化消息

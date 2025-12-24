@@ -24,7 +24,7 @@ func GetAppVersion() string {
 
 var (
 	AppName    = "Puff"
-	AppVersion = "v0.9.2"
+	AppVersion = "v0.9.3"
 )
 
 func main() {
@@ -183,6 +183,10 @@ func handleNotifications(monitor *core.Monitor, notificationMgr *notification.No
 			OldStatus: string(event.OldStatus),
 			Message:   event.Message,
 			Timestamp: event.Timestamp,
+		}
+
+		if event.DomainInfo != nil {
+			notificationEvent.WhoisRaw = event.DomainInfo.WhoisRaw
 		}
 
 		// 发送通知

@@ -2201,7 +2201,7 @@
       "port": 43
     },
     "rdap": {
-      "server": ""
+      "server": "https://rdap.registry.co/co/"
     }
   },
   "co.ca": {
@@ -4172,7 +4172,7 @@
       "port": 43
     },
     "rdap": {
-      "server": ""
+      "server": "https://rdap.centralnic.com/gl/"
     }
   },
   "glass": {

@@ -393,8 +393,15 @@ function createDomainRow(domain) {
     const row = document.createElement('tr');
     row.className = 'hover';
     
-    const statusClass = `status-${domain.status || 'unknown'}`;
-    const statusText = getStatusText(domain.status);
+    // Determine effective status
+    let effectiveStatus = domain.status || 'unknown';
+    // Check if it's effectively 'checking'
+    if (effectiveStatus === 'unknown' && (domain.query_method === 'checking' || domain.query_method === 'pending')) {
+        effectiveStatus = 'checking';
+    }
+
+    const statusClass = getStatusColor(effectiveStatus);
+    const statusText = getStatusText(effectiveStatus);
     const lastChecked = formatDateTime(domain.last_checked);
     const expiryDate = domain.expiry_date ? formatDateTime(domain.expiry_date) : formatFieldValue('', 'expiry_date', domain);
     
@@ -448,10 +455,11 @@ function getStatusText(status) {
         'redemption': '赎回期',
         'pending_delete': '待删除',
         'error': '查询错误',
-        'checking': '正在查询'
+        'checking': '正在查询',
+        'unknown': '未知状态'
     };
     
-    return statusMap[status] || '已注册';
+    return statusMap[status] || '未知状态';
 }
 
 // 格式化字段值，处理不支持的字段
@@ -465,16 +473,27 @@ function formatFieldValue(value, fieldType, domain) {
     }
     
     // 如果是正在查询状态，显示"正在查询"
-    if (domain && domain.status === 'checking') {
+    const isChecking = (domain && domain.status === 'checking') || 
+                       (domain && domain.status === 'unknown' && (domain.query_method === 'checking' || domain.query_method === 'pending'));
+
+    if (isChecking) {
         if (fieldType === 'registrar' || fieldType === 'created_date' || 
             fieldType === 'expiry_date' || fieldType === 'updated_date') {
             return '<span class="text-info">正在查询...</span>';
         }
     }
+
+    // 如果是未知状态，显示"未知"
+    if (domain && domain.status === 'unknown') {
+        if (fieldType === 'registrar' || fieldType === 'created_date' || 
+            fieldType === 'expiry_date' || fieldType === 'updated_date') {
+            return '<span class="text-base-content/60">未知</span>';
+        }
+    }
     
     if (!value || value === '-') {
-        // 如果字段为空且域名状态不是available、error、checking，显示不支持提示
-        if (domain && domain.status !== 'available' && domain.status !== 'error' && domain.status !== 'checking') {
+        // 如果字段为空且域名状态不是available、error、checking、unknown，显示不支持提示
+        if (domain && domain.status !== 'available' && domain.status !== 'error' && domain.status !== 'checking' && domain.status !== 'unknown') {
             const tld = domain.name.split('.').pop();
             switch (fieldType) {
                 case 'registrar':
@@ -507,9 +526,10 @@ function getStatusColor(status) {
         'redemption': 'badge-warning',
         'pending_delete': 'badge-error',
         'error': 'badge-error',
-        'unknown': 'badge-primary'
+        'checking': 'badge-info',
+        'unknown': 'badge-ghost'
     };
-    return colorMap[status] || 'badge-primary';
+    return colorMap[status] || 'badge-ghost';
 }
 
 // 显示加载状态
