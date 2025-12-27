@@ -206,6 +206,6 @@ docker compose up -d
 
 ## 星标趋势
 
-[](https://api.star-history.com/svg?repos=spatiostu/Puff&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=spatiostu/Puff&type=date&legend=top-left)](https://www.star-history.com/#spatiostu/Puff&type=date&legend=top-left)
 
 MIT License
