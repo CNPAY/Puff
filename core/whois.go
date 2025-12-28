@@ -41,10 +41,29 @@ func (w *WhoisClient) QueryWhois(domain, server string, port int) (string, error
 	ctx, cancel := context.WithTimeout(context.Background(), w.timeout)
 	defer cancel()
 
+	logger.Debug("WHOIS查询: %s (Server: %s), 超时设置: %v", domain, server, w.timeout)
+
 	if d, ok := dialer.(proxy.ContextDialer); ok {
 		conn, err = d.DialContext(ctx, "tcp", address)
 	} else {
-		conn, err = dialer.Dial("tcp", address)
+		// Fallback for dialers that don't support ContextDialer
+		// Use a goroutine to enforce timeout during connection
+		type dialResult struct {
+			c net.Conn
+			e error
+		}
+		ch := make(chan dialResult, 1)
+		go func() {
+			c, e := dialer.Dial("tcp", address)
+			ch <- dialResult{c, e}
+		}()
+
+		select {
+		case res := <-ch:
+			conn, err = res.c, res.e
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
 	}
 
 	if err != nil {

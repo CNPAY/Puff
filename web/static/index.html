@@ -391,7 +391,7 @@
                         <div class="space-y-4">
                             <div class="form-control">
                                 <label class="label">
-                                    <span class="label-text">检查间隔（分钟）</span>
+                                    <span class="label-text">检查间隔（秒）</span>
                                 </label>
                                 <input type="number" class="input input-bordered" id="checkIntervalInput">
                             </div>
@@ -531,6 +531,10 @@
                 <p>当前版本: <span id="current-version"></span></p>
                 <p>最新版本: <span id="latest-version" class="text-primary font-bold"></span></p>
                 <p class="mt-2">发布时间: <span id="publish-date"></span></p>
+                
+                <div class="divider">更新内容</div>
+                <div id="release-body" class="bg-base-200 p-3 rounded-lg text-sm max-h-60 overflow-y-auto whitespace-pre-wrap"></div>
+                
                 <p class="mt-4 text-sm text-gray-500">建议更新到最新版本以获得更好的体验和功能</p>
             </div>
             <div class="modal-action">

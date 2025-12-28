@@ -133,7 +133,6 @@ func (a *Authenticator) CleanupExpiredSessions() int {
 func (a *Authenticator) GetStats() map[string]interface{} {
 	stats := a.sessionStore.GetStats()
 	stats["has_credentials"] = a.username != "" && a.password != ""
-	stats["username"] = a.username
 	return stats
 }
 

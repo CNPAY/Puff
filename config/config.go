@@ -266,8 +266,8 @@ func (cfg *Config) Validate() error {
 		return fmt.Errorf("服务器密码不能为空")
 	}
 
-	if cfg.Monitor.CheckInterval < time.Minute {
-		return fmt.Errorf("检查间隔不能小于1分钟")
+	if cfg.Monitor.CheckInterval < 5*time.Second {
+		return fmt.Errorf("检查间隔不能小于5秒")
 	}
 
 	if cfg.Monitor.ConcurrentLimit <= 0 {

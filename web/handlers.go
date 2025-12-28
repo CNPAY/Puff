@@ -28,6 +28,7 @@ func SetAppVersion(version string) {
 type GithubRelease struct {
 	TagName     string `json:"tag_name"`
 	PublishedAt string `json:"published_at"`
+	Body        string `json:"body"`
 }
 
 // Notifier 通知器接口（为了类型引用）
@@ -1267,7 +1268,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"concurrent_limit": s.config.Monitor.ConcurrentLimit,
 			"timeout":          int(s.config.Monitor.Timeout.Seconds()),
 		},
-		"username": s.auth.GetStats()["username"],
+		"username": s.config.Server.Username,
 	}
 
 	s.writeJSON(w, settings)
@@ -1292,12 +1293,12 @@ func (s *Server) handleMonitorSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 验证参数
-	if req.CheckInterval < 60 {
-		s.writeError(w, "检查间隔不能小于60秒", http.StatusBadRequest)
+	if req.CheckInterval < 5 {
+		s.writeError(w, "检查间隔不能小于5秒", http.StatusBadRequest)
 		return
 	}
-	if req.ConcurrentLimit <= 0 || req.ConcurrentLimit > 200 {
-		s.writeError(w, "并发限制必须在1-200之间", http.StatusBadRequest)
+	if req.ConcurrentLimit <= 0 || req.ConcurrentLimit > 1000 {
+		s.writeError(w, "并发限制必须在1-1000之间", http.StatusBadRequest)
 		return
 	}
 	if req.Timeout <= 0 || req.Timeout > 120 {
@@ -1322,10 +1323,12 @@ func (s *Server) handleMonitorSettings(w http.ResponseWriter, r *http.Request) {
 	s.config.Monitor.Timeout = time.Duration(req.Timeout) * time.Second
 
 	// 热重载：更新checker的配置
-	s.monitor.GetChecker().UpdateConfig(s.config)
+	if s.monitor.GetChecker() != nil {
+		s.monitor.GetChecker().UpdateConfig(s.config)
+	}
 
-	// 热重载：更新并发限制
-	s.monitor.UpdateConcurrentLimit(req.ConcurrentLimit)
+	// 热重载：通过UpdateConfig统一更新，它内部会处理并发限制
+	s.monitor.UpdateConfig(s.config)
 
 	logger.Info("监控参数已热重载: 间隔=%ds, 并发=%d, 超时=%ds",
 		req.CheckInterval, req.ConcurrentLimit, req.Timeout)
@@ -1434,7 +1437,7 @@ func (s *Server) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	currentVersion := AppVersion
 
 	// 获取最新版本信息
-	resp, err := http.Get("https://api.bitaur.com/puff/version")
+	resp, err := http.Get("https://spatioweb.com/puff/version")
 	if err != nil {
 		logger.Warn("检查更新失败: %v", err)
 		s.writeJSON(w, map[string]interface{}{
@@ -1460,5 +1463,6 @@ func (s *Server) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 		"latestVersion":   release.TagName,
 		"publishedAt":     release.PublishedAt,
 		"updateAvailable": release.TagName != currentVersion,
+		"announcement":    release.Body,
 	})
 }

@@ -115,10 +115,30 @@ func (w *DomainWorker) run() {
 				case <-ticker.C:
 					// 定期检查是否需要提前查询（配置变更）
 					newNextCheck := w.calculateNextCheckTime()
+
+					// 如果新的检查时间比当前时间早，或者比之前的计划时间早很多，说明配置变了
+					// 注意：这里简单判断如果新时间已过，立即执行
 					if newNextCheck.Before(time.Now()) {
-						logger.Info("域名 %s 检测到配置变更，提前开始查询", w.domain)
+						logger.Info("域名 %s 检测到配置变更(时间已过)，提前开始查询", w.domain)
 						ticker.Stop()
 						w.executeQuery()
+						break checkLoop
+					}
+
+					// 计算当前还需等待的时间
+					newWaitDuration := time.Until(newNextCheck)
+
+					// 如果 newNextCheck 明显早于 nextCheck（比如早了超过 5 秒），说明间隔缩短了
+					if newNextCheck.Before(nextCheck.Add(-5 * time.Second)) {
+						logger.Info("域名 %s 检测到间隔缩短，重置等待时间: %v -> %v", w.domain, nextCheck.Sub(time.Now()), newWaitDuration)
+						ticker.Stop()
+
+						// 如果时间已经过了（或非常接近），直接执行
+						if newWaitDuration <= 0 {
+							w.executeQuery()
+						} else {
+							// 否则，直接跳出内部循环，外层循环会重新计算并设置新的计时器
+						}
 						break checkLoop
 					}
 				case <-w.stopCh:
@@ -152,21 +172,37 @@ func (w *DomainWorker) run() {
 
 // executeQuery 执行查询并保存结果
 func (w *DomainWorker) executeQuery() {
-	startTime := time.Now()
-	logger.Info("域名 %s 开始查询，时间: %s", w.domain, startTime.Format("2006-01-02 15:04:05"))
+	// 记录准备开始查询的时间
+	prepareTime := time.Now()
 
-	// 记录查询开始时间（用于通知聚合）
+	// 记录查询开始（用于通知聚合）
 	if w.queryRecorder != nil {
 		w.queryRecorder(w.domain)
 	}
 
-	// 获取信号量（并发控制）- 阻塞等待
-	w.semaphore <- struct{}{}
+	// 获取当前的信号量（并发控制）
+	// 注意：必须先获取当前的信号量引用，避免在等待期间信号量被更新导致死锁
+	// 如果在等待期间 WorkerManager 更新了信号量，w.semaphore 会指向新的 channel
+	// 但我们必须确保 Acquire 和 Release 操作的是同一个 channel
+	sem := w.semaphore
 
-	// 查询完成后释放信号量
+	// 阻塞等待获取信号量
+	logger.Debug("域名 %s 准备获取信号量 (容量: %d)", w.domain, cap(sem))
+	sem <- struct{}{}
+
+	// 查询完成后释放信号量（使用同一个信号量引用）
 	defer func() {
-		<-w.semaphore
+		<-sem
 	}()
+
+	startTime := time.Now()
+	// 计算等待时间
+	waitTime := startTime.Sub(prepareTime)
+	if waitTime > 100*time.Millisecond {
+		logger.Debug("域名 %s 等待并发槽位耗时: %v", w.domain, waitTime)
+	}
+
+	logger.Info("域名 %s 开始查询，时间: %s", w.domain, startTime.Format("2006-01-02 15:04:05"))
 
 	// 从数据库读取之前的状态
 	previousResult, err := storage.GetDomainResult(w.domain)
@@ -357,34 +393,38 @@ func (w *DomainWorker) calculateNextCheckTime() time.Time {
 
 // getIntervalByStatus 根据状态获取查询间隔
 func (w *DomainWorker) getIntervalByStatus(status DomainStatus) time.Duration {
+	// 优先使用配置的全局查询间隔，解决热重载失效问题
+	// 用户希望通过设置界面的"检查间隔"来控制所有域名的查询频率
+	baseInterval := w.config.Monitor.CheckInterval
+
 	switch status {
 	case StatusAvailable:
-		// 可注册：频繁查询
-		return 30 * time.Minute
+		// 可注册：使用配置间隔
+		return baseInterval
 
 	case StatusPendingDelete:
-		// 待删除：最高频率
-		return 5 * time.Minute
+		// 待删除：使用配置间隔
+		return baseInterval
 
 	case StatusRedemption:
-		// 赎回期：1小时
-		return 1 * time.Hour
+		// 赎回期：使用配置间隔
+		return baseInterval
 
 	case StatusGrace:
-		// 宽限期：30分钟
-		return 30 * time.Minute
+		// 宽限期：使用配置间隔
+		return baseInterval
 
 	case StatusError:
-		// 错误状态：1小时后重试
+		// 错误状态：1小时后重试 (保持较长间隔避免频繁报错)
 		return 1 * time.Hour
 
 	case StatusRegistered:
 		// 已注册：使用配置的间隔
-		return w.config.Monitor.CheckInterval
+		return baseInterval
 
 	default:
 		// 其他状态：使用配置的间隔
-		return w.config.Monitor.CheckInterval
+		return baseInterval
 	}
 }
 
@@ -544,4 +584,16 @@ func (m *WorkerManager) UpdateConcurrentLimit(limit int) {
 	m.mu.Unlock()
 
 	logger.Info("并发限制已更新为: %d", limit)
+}
+
+// UpdateConfig 更新配置
+func (m *WorkerManager) UpdateConfig(cfg *config.Config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.config = cfg
+	// 更新所有worker的配置引用
+	for _, worker := range m.workers {
+		worker.config = cfg
+	}
 }

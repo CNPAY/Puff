@@ -353,6 +353,8 @@ func (r *RDAPClient) parseRDAPEvents(events []RDAPEvent, info *DomainInfo) {
 			info.CreatedDate = &event.EventDate
 		case "expiration":
 			info.ExpiryDate = &event.EventDate
+		case "soft expiration":
+			info.ExpiryDate = &event.EventDate
 		case "last changed", "last update of rdap database":
 			info.UpdatedDate = &event.EventDate
 		}

@@ -105,6 +105,33 @@ func (m *Monitor) Stop() {
 	logger.Info("域名监控已停止")
 }
 
+// UpdateConfig 更新配置（支持热重载）
+func (m *Monitor) UpdateConfig(cfg *config.Config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.config = cfg
+
+	// 1. 更新Checker配置（超时时间等）
+	if m.checker != nil {
+		m.checker.UpdateConfig(cfg)
+	}
+
+	// 2. 更新WorkerManager配置（查询间隔等）
+	if m.workerManager != nil {
+		m.workerManager.UpdateConfig(cfg)
+
+		// 3. 更新并发限制
+		// 注意：这里单独调用UpdateConcurrentLimit，因为UpdateConfig只更新config引用
+		m.workerManager.UpdateConcurrentLimit(cfg.Monitor.ConcurrentLimit)
+	}
+
+	logger.Info("Monitor配置已更新: 间隔=%v, 并发=%d, 超时=%v",
+		cfg.Monitor.CheckInterval,
+		cfg.Monitor.ConcurrentLimit,
+		cfg.Monitor.Timeout)
+}
+
 // IsRunning 检查是否正在运行
 func (m *Monitor) IsRunning() bool {
 	m.mu.RLock()
@@ -416,12 +443,10 @@ func (m *Monitor) GetStats() map[string]interface{} {
 	workerCount := m.workerManager.GetWorkerCount()
 
 	stats := map[string]interface{}{
-		"domain_count":     domainCount,
-		"is_running":       isRunning,
-		"check_interval":   m.config.Monitor.CheckInterval.String(),
-		"concurrent_limit": m.config.Monitor.ConcurrentLimit,
-		"worker_count":     workerCount,
-		"uptime":           time.Since(m.startTime).String(),
+		"domain_count": domainCount,
+		"is_running":   isRunning,
+		"worker_count": workerCount,
+		"uptime":       time.Since(m.startTime).String(),
 	}
 
 	// 统计各状态的域名数量
@@ -437,10 +462,4 @@ func (m *Monitor) GetStats() map[string]interface{} {
 // GetChecker 获取域名检查器
 func (m *Monitor) GetChecker() *DomainChecker {
 	return m.checker
-}
-
-// UpdateConcurrentLimit 更新并发限制
-func (m *Monitor) UpdateConcurrentLimit(limit int) {
-	m.workerManager.UpdateConcurrentLimit(limit)
-	m.config.Monitor.ConcurrentLimit = limit
 }

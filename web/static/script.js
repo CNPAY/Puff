@@ -79,13 +79,17 @@ document.addEventListener('DOMContentLoaded', function() {
     initializeEventListeners();
     initializeNavigation();
     loadData();
-    checkForUpdates(); // 检查更新
+    // 检查更新
+    checkForUpdates();
+    
+    // 定期检查更新（每6小时）
+    setInterval(checkForUpdates, 6 * 60 * 60 * 1000);
     
     setInterval(() => {
          if (currentPage === 'dashboard') {
              loadData();
          }
-     }, 300000); // 每5分钟刷新一次
+     }, 30000); // 每30秒刷新一次
 });
 
 // 初始化事件监听器
@@ -522,7 +526,7 @@ function getStatusColor(status) {
     const colorMap = {
         'available': 'badge-success',
         'registered': 'badge-primary', 
-        'grace': 'badge-warning',
+        'grace': 'badge-info',
         'redemption': 'badge-warning',
         'pending_delete': 'badge-error',
         'error': 'badge-error',
@@ -1097,26 +1101,6 @@ async function loadSystemSettings() {
         
         const stats = await response.json();
         
-        // 填充设置表单
-        const checkIntervalInput = document.getElementById('checkIntervalInput');
-        const concurrentLimitInput = document.getElementById('concurrentLimitInput');
-        const timeoutInput = document.getElementById('timeoutInput');
-        
-        if (checkIntervalInput) {
-            // 从字符串中提取分钟数 (例如: "5m0s" -> 5)
-            const interval = stats.monitor.check_interval;
-            const minutes = parseInt(interval.match(/(\d+)m/)?.[1] || '5');
-            checkIntervalInput.value = minutes;
-        }
-        
-        if (concurrentLimitInput) {
-            concurrentLimitInput.value = stats.monitor.concurrent_limit;
-        }
-        
-        if (timeoutInput) {
-            timeoutInput.value = 30; // 默认值
-        }
-        
         // 显示系统统计信息
         const systemStats = document.getElementById('systemStats');
         if (systemStats) {
@@ -1130,12 +1114,8 @@ async function loadSystemSettings() {
                     <div class="stat-value">${stats.monitor.domain_count}</div>
                 </div>
                 <div class="stat">
-                    <div class="stat-title">检查间隔</div>
-                    <div class="stat-value">${stats.monitor.check_interval}</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-title">并发限制</div>
-                    <div class="stat-value">${stats.monitor.concurrent_limit}</div>
+                    <div class="stat-title">Worker数量</div>
+                    <div class="stat-value">${stats.monitor.worker_count}</div>
                 </div>
                 <div class="stat">
                     <div class="stat-title">活跃会话</div>
@@ -1157,6 +1137,23 @@ async function loadConfigSettings() {
         if (!response.ok) throw new Error('加载配置失败');
         
         const settings = await response.json();
+        
+        // 填充监控设置
+        if (settings.monitor) {
+            const checkIntervalInput = document.getElementById('checkIntervalInput');
+            const concurrentLimitInput = document.getElementById('concurrentLimitInput');
+            const timeoutInput = document.getElementById('timeoutInput');
+
+            if (checkIntervalInput) {
+                checkIntervalInput.value = settings.monitor.check_interval;
+            }
+            if (concurrentLimitInput) {
+                concurrentLimitInput.value = settings.monitor.concurrent_limit;
+            }
+            if (timeoutInput) {
+                timeoutInput.value = settings.monitor.timeout;
+            }
+        }
         
         // 填充SMTP设置
         if (settings.smtp) {
@@ -1509,18 +1506,29 @@ async function saveTelegramSettings() {
 
 // 保存监控设置
 async function saveMonitorSettings() {
-    const checkInterval = parseInt(document.getElementById('checkIntervalInput').value);
-    const concurrentLimit = parseInt(document.getElementById('concurrentLimitInput').value);
-    const timeout = parseInt(document.getElementById('timeoutInput').value);
+    const checkIntervalInput = document.getElementById('checkIntervalInput');
+    const concurrentLimitInput = document.getElementById('concurrentLimitInput');
+    const timeoutInput = document.getElementById('timeoutInput');
+    
+    // 获取原始值
+    const checkInterval = parseInt(checkIntervalInput.value);
+    const concurrentLimit = parseInt(concurrentLimitInput.value);
+    const timeout = parseInt(timeoutInput.value);
     
     // 验证参数
-    if (!checkInterval || checkInterval < 1) {
-        showNotification('检查间隔必须大于0分钟', 'error');
+    if (!checkInterval || checkInterval < 5) {
+        showNotification('检查间隔不能小于5秒', 'error');
+        checkIntervalInput.value = 5; // 重置为最小值
         return;
     }
     
-    if (!concurrentLimit || concurrentLimit < 1 || concurrentLimit > 200) {
-        showNotification('并发限制必须在1-200之间', 'error');
+    if (checkInterval < 30) {
+        // 建议提示
+        showNotification('建议：检查间隔设置小于30秒可能会触发频率限制', 'warning', 5000);
+    }
+    
+    if (!concurrentLimit || concurrentLimit < 1 || concurrentLimit > 1000) {
+        showNotification('并发限制必须在1-1000之间', 'error');
         return;
     }
     
@@ -1534,7 +1542,7 @@ async function saveMonitorSettings() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                check_interval: checkInterval * 60, // 转换为秒
+                check_interval: checkInterval, // 直接发送秒数
                 concurrent_limit: concurrentLimit,
                 timeout: timeout
             })
@@ -1544,6 +1552,9 @@ async function saveMonitorSettings() {
         
         if (response.ok) {
             showNotification(result.message || '监控设置保存成功', 'success');
+            
+            // 重新加载页面数据，因为后端可能已经更新了配置
+            setTimeout(loadSystemSettings, 500);
         } else {
             showNotification(result.error || result.message || '保存监控设置失败', 'error');
         }
@@ -1824,6 +1835,17 @@ async function checkForUpdates() {
         if (hasUpdate) {
             document.getElementById('current-version').textContent = data.currentVersion;
             document.getElementById('latest-version').textContent = data.latestVersion;
+            
+            // 处理更新日志的换行显示
+            const releaseBody = document.getElementById('release-body');
+            const announcement = data.announcement || data.body;
+            if (releaseBody && announcement) {
+                // 将换行符转换为HTML的换行标签
+                releaseBody.innerHTML = announcement.replace(/\r\n/g, '<br>').replace(/\n/g, '<br>');
+            } else if (releaseBody) {
+                releaseBody.textContent = '暂无更新日志';
+            }
+
             if (data.publishedAt) {
                 const publishDate = new Date(data.publishedAt);
                 document.getElementById('publish-date').textContent = publishDate.toLocaleString('zh-CN', dateTimeOptions);

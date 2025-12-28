@@ -24,7 +24,7 @@ func GetAppVersion() string {
 
 var (
 	AppName    = "Puff"
-	AppVersion = "v0.9.3"
+	AppVersion = "v0.9.4"
 )
 
 func main() {
