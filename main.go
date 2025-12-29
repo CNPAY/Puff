@@ -227,5 +227,5 @@ func getBuildTime() string {
 
 // 获取Go版本
 func getGoVersion() string {
-	return "go1.21+"
+	return "go1.23+"
 }
